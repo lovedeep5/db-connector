@@ -14,7 +14,6 @@ if (!url) {
 const g = globalThis as unknown as {
   __dbcPool?: Pool;
   __dbcDrizzle?: NodePgDatabase<typeof schema>;
-  __dbcBootstrapped?: boolean;
   __dbcSchedulerKickedOff?: boolean;
 };
 
@@ -51,15 +50,18 @@ const pool = (g.__dbcPool ??= new Pool(buildPoolConfig(url)));
 export const db: NodePgDatabase<typeof schema> = (g.__dbcDrizzle ??= drizzle(pool, { schema }));
 export { schema };
 
-// First-time-only bootstrap of the schema. SQL is `IF NOT EXISTS` everywhere
-// so re-runs are no-ops.
-if (!g.__dbcBootstrapped) {
-  g.__dbcBootstrapped = true;
-  bootstrap(pool).catch((e) => {
-    // eslint-disable-next-line no-console
-    console.error("[db] bootstrap failed:", e);
-  });
-}
+// Run schema bootstrap on every module load (cold start, plus HMR re-evals
+// in dev). Every statement is idempotent — `CREATE TABLE IF NOT EXISTS`,
+// `ADD COLUMN IF NOT EXISTS`, etc. — so re-running is a no-op. Doing this
+// guard-free means any new ALTER added to bootstrap.ts takes effect the
+// next time this file is imported, with no manual migration step.
+//
+// (The previous globalThis-gated version caused stale-schema bugs: when a
+// new column was added the bootstrap would skip because "already ran".)
+bootstrap(pool).catch((e) => {
+  // eslint-disable-next-line no-console
+  console.error("[db] bootstrap failed:", e);
+});
 
 // Boot the in-process scheduler once per Node server process.
 if (!g.__dbcSchedulerKickedOff) {
