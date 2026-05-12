@@ -62,7 +62,7 @@ export const connections = pgTable("connections", {
   id: id(),
   /** Display name. No DB-level uniqueness — personal + shared can collide and that's fine. */
   name: text("name").notNull(),
-  type: text("type", { enum: ["postgres", "mysql", "mongodb", "oracle", "smtp"] }).notNull(),
+  type: text("type", { enum: ["postgres", "mysql", "mongodb", "oracle", "smtp", "s3"] }).notNull(),
   description: text("description"),
   encryptedConfig: text("encrypted_config").notNull(),
   /**
@@ -181,6 +181,8 @@ export const flows = pgTable("flows", {
   webhookSecret: text("webhook_secret"),
   lastRunAt: timestamp("last_run_at", { withTimezone: true, mode: "date" }),
   lastRunStatus: text("last_run_status", { enum: ["success", "error", "skipped", "cancelled"] }),
+  /** Free-form JSON state for triggers that need to remember things across polls (e.g. S3 watermark). */
+  triggerState: text("trigger_state"),
   createdAt: ts("created_at"),
   updatedAt: ts("updated_at"),
 });
@@ -188,7 +190,7 @@ export const flows = pgTable("flows", {
 export const flowRuns = pgTable("flow_runs", {
   id: id(),
   flowId: text("flow_id").notNull().references(() => flows.id, { onDelete: "cascade" }),
-  triggerType: text("trigger_type", { enum: ["schedule", "manual", "webhook"] }).notNull(),
+  triggerType: text("trigger_type", { enum: ["schedule", "manual", "webhook", "s3"] }).notNull(),
   triggerPayload: text("trigger_payload"),
   status: text("status", { enum: ["pending", "running", "success", "error", "cancelled"] }).notNull(),
   startedBy: text("started_by").references(() => users.id, { onDelete: "set null" }),

@@ -13,7 +13,30 @@ export type FlowDefinition = {
 export type TriggerSpec =
   | { type: "schedule"; config: { cron: string } }
   | { type: "manual"; config: Record<string, never> }
-  | { type: "webhook"; config: { method?: "POST" | "GET" } };
+  | { type: "webhook"; config: { method?: "POST" | "GET" } }
+  | {
+      type: "s3.objectCreated";
+      config: {
+        /** S3 credential id from the connections table. */
+        connectionId: string;
+        bucket: string;
+        /** Folder prefix (optional). e.g. "uploads/incoming/" */
+        prefix?: string;
+        /** Suffix / extension filter (optional). e.g. ".csv" */
+        suffix?: string;
+        /** Seconds between polls. Server clamps to [30, 1800]. */
+        pollIntervalSec: number;
+        /**
+         * - skipExisting: when first activated, ignore existing objects;
+         *   only fire for keys that land after.
+         * - processAll: fire for every existing object on first poll, then
+         *   stream new ones.
+         */
+        mode: "skipExisting" | "processAll";
+        /** Cap on objects fired per poll. Default 50. Backlog spills to the next tick. */
+        maxBatch: number;
+      };
+    };
 
 export type FlowNode = {
   id: string;
@@ -37,7 +60,19 @@ export type FlowEdge = {
 export type TriggerPayload =
   | { kind: "schedule"; firedAt: Date }
   | { kind: "manual"; startedBy: string }
-  | { kind: "webhook"; body: unknown; headers: Record<string, string>; query: Record<string, string> };
+  | { kind: "webhook"; body: unknown; headers: Record<string, string>; query: Record<string, string> }
+  | {
+      kind: "s3";
+      bucket: string;
+      key: string;
+      size: number;
+      /** ISO timestamp string for predictable templating. */
+      lastModified: string;
+      etag: string;
+      contentType?: string;
+      /** Short-lived presigned GET URL so the Download File node "just works". */
+      presignedUrl: string;
+    };
 
 // ─── Node execution interface ──────────────────────────────────────────
 

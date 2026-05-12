@@ -21,7 +21,7 @@ const Schema = z
   .object({
     name: z.string().min(1, "Required"),
     description: z.string().optional(),
-    type: z.enum(["postgres", "mysql", "mongodb", "oracle", "smtp"]),
+    type: z.enum(["postgres", "mysql", "mongodb", "oracle", "smtp", "s3"]),
     visibility: z.enum(["private", "team", "everyone"]).default("private"),
     // SQL fields
     host: z.string().optional(),
@@ -37,6 +37,12 @@ const Schema = z
     // SMTP
     secure: z.boolean().optional(),
     from: z.string().optional(),
+    // S3 / S3-compatible object storage
+    region: z.string().optional(),
+    accessKeyId: z.string().optional(),
+    secretAccessKey: z.string().optional(),
+    endpoint: z.string().optional(),
+    defaultBucket: z.string().optional(),
   })
   .superRefine((val, ctx) => {
     const need = (k: keyof typeof val, msg = "Required") => {
@@ -50,6 +56,8 @@ const Schema = z
       need("connectString"); need("user");
     } else if (val.type === "smtp") {
       need("host"); need("port"); need("from");
+    } else if (val.type === "s3") {
+      need("region"); need("accessKeyId"); need("secretAccessKey");
     }
   });
 
@@ -88,6 +96,15 @@ function buildConfig(values: FormValues) {
         user: values.user || undefined,
         password: values.password || undefined,
         from: values.from!,
+      };
+    case "s3":
+      return {
+        type: "s3" as const,
+        region: values.region!,
+        accessKeyId: values.accessKeyId!,
+        secretAccessKey: values.secretAccessKey!,
+        endpoint: values.endpoint || undefined,
+        defaultBucket: values.defaultBucket || undefined,
       };
   }
 }
@@ -141,8 +158,8 @@ export function ConnectionForm({ canCreateShared }: { canCreateShared?: boolean 
         config: buildConfig(values),
         visibility: values.visibility,
       });
-      toast.success("Connection saved");
-      router.push("/connections");
+      toast.success("Credential saved");
+      router.push("/credentials");
       router.refresh();
     } catch (e) {
       toast.error((e as Error).message);
@@ -177,6 +194,7 @@ export function ConnectionForm({ canCreateShared }: { canCreateShared?: boolean 
                       <SelectItem value="mongodb">MongoDB</SelectItem>
                       <SelectItem value="oracle">Oracle</SelectItem>
                       <SelectItem value="smtp">SMTP (Email)</SelectItem>
+                      <SelectItem value="s3">AWS S3 (Object storage)</SelectItem>
                     </SelectContent>
                   </Select>
                 )}
@@ -346,6 +364,41 @@ export function ConnectionForm({ canCreateShared }: { canCreateShared?: boolean 
                 <Label>From address</Label>
                 <Input placeholder={`"Reports" <noreply@your.co>`} {...register("from")} />
                 {errors.from && <p className="text-xs text-destructive">{errors.from.message}</p>}
+              </div>
+            </>
+          )}
+
+          {type === "s3" && (
+            <>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>AWS region</Label>
+                  <Input placeholder="us-east-1" {...register("region")} />
+                  {errors.region && <p className="text-xs text-destructive">{errors.region.message}</p>}
+                </div>
+                <div className="space-y-2">
+                  <Label>Default bucket (optional)</Label>
+                  <Input placeholder="my-bucket" {...register("defaultBucket")} />
+                </div>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Access key ID</Label>
+                  <Input placeholder="AKIA..." {...register("accessKeyId")} />
+                  {errors.accessKeyId && <p className="text-xs text-destructive">{errors.accessKeyId.message}</p>}
+                </div>
+                <div className="space-y-2">
+                  <Label>Secret access key</Label>
+                  <Input type="password" {...register("secretAccessKey")} />
+                  {errors.secretAccessKey && <p className="text-xs text-destructive">{errors.secretAccessKey.message}</p>}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Custom endpoint (optional)</Label>
+                <Input placeholder="https://minio.local:9000   or   https://<account>.r2.cloudflarestorage.com" {...register("endpoint")} />
+                <p className="text-[11px] text-muted-foreground">
+                  Leave blank for real AWS S3. Set this for MinIO, Cloudflare R2, DigitalOcean Spaces, or any other S3-compatible storage.
+                </p>
               </div>
             </>
           )}

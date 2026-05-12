@@ -187,6 +187,29 @@ function FlowEditorInner({
       e.preventDefault();
       const cat = findCatalog(type);
       if (!cat) return;
+      // Dropping a trigger replaces the flow's existing trigger — same
+      // behaviour as picking one from the trigger-kind dropdown, since a
+      // flow has exactly one entry point.
+      if (cat.isTrigger) {
+        const next: TriggerSpec =
+          type === "schedule"
+            ? { type: "schedule", config: { cron: "0 9 * * *" } }
+            : type === "webhook"
+            ? { type: "webhook", config: {} }
+            : type === "s3.objectCreated"
+            ? { type: "s3.objectCreated", config: { connectionId: "", bucket: "", prefix: "", suffix: "", pollIntervalSec: 60, mode: "skipExisting", maxBatch: 50 } }
+            : { type: "manual", config: {} as never };
+        setTrigger(next);
+        setNodes((ns) =>
+          ns.map((n) =>
+            n.id === TRIGGER_ID
+              ? { ...n, data: { ...n.data, type, label: cat.label } }
+              : n
+          )
+        );
+        setSelectedId(TRIGGER_ID);
+        return;
+      }
       const position = screenToFlowPosition({ x: e.clientX, y: e.clientY });
       const id = `${type.replace(/\W/g, "_")}_${Math.random().toString(36).slice(2, 7)}`;
       setNodes((ns) => [
@@ -206,6 +229,13 @@ function FlowEditorInner({
   const addNode = (type: string) => {
     const cat = findCatalog(type);
     if (!cat) return;
+    // Triggers aren't a stack — a flow has exactly one. Picking a trigger
+    // type from the palette replaces the current one and focuses the trigger
+    // sentinel, identical to the explicit "change trigger kind" dropdown.
+    if (cat.isTrigger) {
+      onTriggerKindChange(type as TriggerSpec["type"]);
+      return;
+    }
     const id = `${type.replace(/\W/g, "_")}_${Math.random().toString(36).slice(2, 7)}`;
     setNodes((ns) => [
       ...ns,
@@ -246,6 +276,19 @@ function FlowEditorInner({
         ? { type: "schedule", config: { cron: "0 9 * * *" } }
         : kind === "webhook"
         ? { type: "webhook", config: {} }
+        : kind === "s3.objectCreated"
+        ? {
+            type: "s3.objectCreated",
+            config: {
+              connectionId: "",
+              bucket: "",
+              prefix: "",
+              suffix: "",
+              pollIntervalSec: 60,
+              mode: "skipExisting",
+              maxBatch: 50,
+            },
+          }
         : { type: "manual", config: {} as never };
     setTrigger(next);
     setNodes((ns) =>

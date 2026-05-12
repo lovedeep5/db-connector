@@ -6,7 +6,7 @@
  */
 import {
   CalendarClock, MousePointerClick, Webhook, Database, Globe, Mail, FileDown, Code2,
-  Split, Filter, Variable, MoveDown, Clock, Download, Repeat, CornerDownLeft,
+  Split, Filter, Variable, MoveDown, Clock, Download, Repeat, CornerDownLeft, Cloud,
 } from "lucide-react";
 
 export type CatalogEntry = {
@@ -28,6 +28,7 @@ export const CATALOG: CatalogEntry[] = [
   { type: "schedule", label: "Schedule", description: "Run on a cron expression.", category: "trigger", icon: CalendarClock, accent: "blue", isTrigger: true },
   { type: "manual", label: "Manual", description: "Only runs when someone clicks Run.", category: "trigger", icon: MousePointerClick, accent: "slate", isTrigger: true },
   { type: "webhook", label: "Webhook", description: "Run when an external system POSTs to a URL.", category: "trigger", icon: Webhook, accent: "violet", isTrigger: true },
+  { type: "s3.objectCreated", label: "S3 New Object", description: "Poll an S3 bucket / folder and run when new objects appear.", category: "trigger", icon: Cloud, accent: "blue", isTrigger: true },
 
   // Actions
   { type: "db.query", label: "DB Query", description: "Run SQL/Mongo against a connection.", category: "data", icon: Database, accent: "blue" },

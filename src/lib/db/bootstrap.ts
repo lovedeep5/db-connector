@@ -193,6 +193,11 @@ export async function bootstrap(pool: Pool): Promise<void> {
       CREATE INDEX IF NOT EXISTS flow_node_runs_by_run
         ON flow_node_runs (flow_run_id, started_at);
 
+      -- Add trigger_state to flows for poll-based triggers (S3, …). The
+      -- column is JSON-shaped text; the runtime parses it. Idempotent ALTER
+      -- so existing installs pick it up without a manual migration.
+      ALTER TABLE flows ADD COLUMN IF NOT EXISTS trigger_state TEXT;
+
       CREATE TABLE IF NOT EXISTS audit_log (
         id TEXT PRIMARY KEY,
         user_id TEXT REFERENCES users(id) ON DELETE SET NULL,

@@ -35,6 +35,14 @@ export async function ensureSchedulerStarted(): Promise<void> {
     // eslint-disable-next-line no-console
     console.error("[flows] failed to start schedules:", e);
   }
+  // And the S3 pollers — same single-pod lifecycle as cron, parallel ticker.
+  try {
+    const { ensureS3PollersStarted } = await import("@/lib/flows/s3-poller");
+    await ensureS3PollersStarted();
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("[s3-trigger] failed to start pollers:", e);
+  }
 }
 
 export async function refreshAllSchedules(): Promise<void> {

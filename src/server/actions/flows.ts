@@ -8,6 +8,7 @@ import { db, schema } from "@/lib/db/client";
 import { requireUser } from "@/lib/session";
 import { loadEffectivePermissions } from "@/lib/rbac";
 import { refreshOneFlow, unregisterFlow } from "@/lib/flows/scheduler-glue";
+import { refreshOneS3Trigger, unregisterTrigger as unregisterS3Trigger } from "@/lib/flows/s3-poller";
 import { runFlow } from "@/server/services/flow-runner";
 import type { FlowDefinition } from "@/lib/flows/types";
 
@@ -15,6 +16,18 @@ const TriggerSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("schedule"), config: z.object({ cron: z.string().min(1) }) }),
   z.object({ type: z.literal("manual"), config: z.object({}).strict() }),
   z.object({ type: z.literal("webhook"), config: z.object({ method: z.enum(["GET", "POST"]).optional() }) }),
+  z.object({
+    type: z.literal("s3.objectCreated"),
+    config: z.object({
+      connectionId: z.string(),
+      bucket: z.string(),
+      prefix: z.string().optional(),
+      suffix: z.string().optional(),
+      pollIntervalSec: z.coerce.number().int().min(30).max(1800),
+      mode: z.enum(["skipExisting", "processAll"]),
+      maxBatch: z.coerce.number().int().min(1).max(1000),
+    }),
+  }),
 ]);
 
 const DefinitionSchema: z.ZodType<FlowDefinition> = z.object({
@@ -92,6 +105,7 @@ export async function createFlow(input: FlowInput): Promise<string> {
     })
     .returning();
   await refreshOneFlow(row.id);
+  await refreshOneS3Trigger(row.id);
   revalidatePath("/flows");
   return row.id;
 }
@@ -122,6 +136,7 @@ export async function updateFlow(id: string, input: FlowInput): Promise<void> {
     })
     .where(eq(schema.flows.id, id));
   await refreshOneFlow(id);
+  await refreshOneS3Trigger(id);
   revalidatePath("/flows");
 }
 
@@ -129,8 +144,13 @@ export async function setFlowActive(id: string, active: boolean): Promise<void> 
   const user = await requireUser();
   await loadFlowOrThrow(id, user.id, user.isSuperAdmin);
   await db.update(schema.flows).set({ isActive: active, updatedAt: new Date() }).where(eq(schema.flows.id, id));
-  if (active) await refreshOneFlow(id);
-  else unregisterFlow(id);
+  if (active) {
+    await refreshOneFlow(id);
+    await refreshOneS3Trigger(id);
+  } else {
+    unregisterFlow(id);
+    unregisterS3Trigger(id);
+  }
   revalidatePath("/flows");
 }
 
@@ -138,6 +158,7 @@ export async function deleteFlow(id: string): Promise<void> {
   const user = await requireUser();
   await loadFlowOrThrow(id, user.id, user.isSuperAdmin);
   unregisterFlow(id);
+  unregisterS3Trigger(id);
   await db.delete(schema.flows).where(eq(schema.flows.id, id));
   revalidatePath("/flows");
 }
@@ -245,6 +266,7 @@ export async function createSampleFlow(): Promise<string> {
     })
     .returning();
   await refreshOneFlow(row.id);
+  await refreshOneS3Trigger(row.id);
   revalidatePath("/flows");
   return row.id;
 }

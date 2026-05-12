@@ -15,6 +15,8 @@ export function createDriver(cfg: ConnectionConfig): DbDriver {
     case "oracle": return new OracleDriver(cfg);
     case "smtp":
       throw new Error("SMTP connections aren't database drivers — use the Send Email node or @/lib/smtp/transport.");
+    case "s3":
+      throw new Error("S3 connections aren't database drivers — they're consumed by S3 triggers and storage nodes.");
   }
 }
 

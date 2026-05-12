@@ -25,7 +25,7 @@ export type NodeConfigProps = {
   nodeId: string;
   nodeType: string;
   /** "trigger" or null (regular node) */
-  triggerKind?: "schedule" | "manual" | "webhook";
+  triggerKind?: "schedule" | "manual" | "webhook" | "s3.objectCreated";
   config: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
   onDelete?: () => void;
@@ -70,6 +70,7 @@ function Body(props: NodeConfigProps) {
   if (triggerKind === "schedule") return <ScheduleTriggerForm {...props} />;
   if (triggerKind === "manual") return <ManualTriggerForm />;
   if (triggerKind === "webhook") return <WebhookTriggerForm />;
+  if (triggerKind === "s3.objectCreated") return <S3TriggerForm {...props} />;
   if (nodeType === "db.query") return <DbQueryForm {...props} />;
   if (nodeType === "http.request") return <HttpRequestForm {...props} />;
   if (nodeType === "email.send") return <SendEmailForm {...props} />;
@@ -150,6 +151,86 @@ function WebhookTriggerForm() {
       <Badge variant="outline" className="text-[10px]">
         Authentication: per-flow secret in <code>?secret=</code> OR HMAC header <code>X-DBConnector-Signature</code>
       </Badge>
+    </div>
+  );
+}
+
+function S3TriggerForm(props: NodeConfigProps) {
+  const s3Conns = props.connections.filter((c) => c.type === "s3");
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <Label className="text-xs">S3 credential</Label>
+        <Select value={get(props, "connectionId", "") as string} onValueChange={(v) => set(props, "connectionId", v)}>
+          <SelectTrigger><SelectValue placeholder="Pick an S3 credential" /></SelectTrigger>
+          <SelectContent>
+            {s3Conns.map((c) => (
+              <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {s3Conns.length === 0 && (
+          <p className="text-[10px] text-muted-foreground">
+            No S3 credentials yet. Add one in <strong>Credentials → New credential → AWS S3</strong>.
+          </p>
+        )}
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">Bucket</Label>
+        <Input value={get(props, "bucket", "") as string} onChange={(e) => set(props, "bucket", e.target.value)} placeholder="my-bucket" />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <Label className="text-xs">Prefix (folder, optional)</Label>
+          <Input value={get(props, "prefix", "") as string} onChange={(e) => set(props, "prefix", e.target.value)} placeholder="uploads/incoming/" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Suffix (optional)</Label>
+          <Input value={get(props, "suffix", "") as string} onChange={(e) => set(props, "suffix", e.target.value)} placeholder=".csv" />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <Label className="text-xs">Poll interval (seconds)</Label>
+          <Input
+            type="number"
+            min={30}
+            max={1800}
+            value={get(props, "pollIntervalSec", 60) as number}
+            onChange={(e) => set(props, "pollIntervalSec", Math.max(30, Math.min(1800, Number(e.target.value) || 60)))}
+          />
+          <p className="text-[10px] text-muted-foreground">30–1800. Default 60.</p>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Max objects per poll</Label>
+          <Input
+            type="number"
+            min={1}
+            max={1000}
+            value={get(props, "maxBatch", 50) as number}
+            onChange={(e) => set(props, "maxBatch", Math.max(1, Math.min(1000, Number(e.target.value) || 50)))}
+          />
+          <p className="text-[10px] text-muted-foreground">Backlog spills to next poll.</p>
+        </div>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">First-poll mode</Label>
+        <Select value={get(props, "mode", "skipExisting") as string} onValueChange={(v) => set(props, "mode", v)}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="skipExisting">Skip existing — only fire for new uploads from now on</SelectItem>
+            <SelectItem value="processAll">Process all — backfill every existing object</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="rounded border border-dashed p-2 text-[11px] text-muted-foreground space-y-1">
+        <p>Each new object fires the flow once. The trigger payload includes:</p>
+        <ul className="ml-3 list-disc space-y-0.5">
+          <li><code>{`{{ $trigger.bucket }}`}</code> · <code>{`{{ $trigger.key }}`}</code> · <code>{`{{ $trigger.size }}`}</code></li>
+          <li><code>{`{{ $trigger.lastModified }}`}</code> · <code>{`{{ $trigger.etag }}`}</code></li>
+          <li><code>{`{{ $trigger.presignedUrl }}`}</code> — drop into the <strong className="text-foreground">Download File</strong> node to fetch it</li>
+        </ul>
+      </div>
     </div>
   );
 }

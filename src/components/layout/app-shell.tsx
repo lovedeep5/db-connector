@@ -5,7 +5,6 @@ import { usePathname } from "next/navigation";
 import {
   Database,
   LayoutDashboard,
-  Terminal,
   Users,
   ShieldCheck,
   Network,
@@ -16,6 +15,10 @@ import {
   CalendarClock,
   Workflow,
   Settings as SettingsIcon,
+  KeyRound,
+  ChevronDown,
+  ChevronRight,
+  Zap,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { signOut } from "next-auth/react";
@@ -35,28 +38,58 @@ import type { Permission } from "@/lib/db/schema";
 type Perms = { isSuperAdmin: boolean; global: Permission[] };
 type User = { id: string; name: string; email: string; isSuperAdmin: boolean };
 
-type NavItem = {
+type Leaf = {
+  kind: "leaf";
   href: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   requires?: Permission | "admin";
 };
 
-const NAV: NavItem[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/connections", label: "Connections", icon: Database },
-  { href: "/query", label: "Query", icon: Terminal, requires: "query:run" },
-  { href: "/automations", label: "Automations", icon: CalendarClock, requires: "query:run" },
-  { href: "/teams", label: "Teams", icon: Network, requires: "admin" },
-  { href: "/roles", label: "Roles", icon: ShieldCheck, requires: "admin" },
-  { href: "/flows", label: "Flows", icon: Workflow, requires: "query:run" },
-  { href: "/users", label: "Users", icon: Users, requires: "admin" },
-  { href: "/settings", label: "Settings", icon: SettingsIcon, requires: "admin" },
+type Group = {
+  kind: "group";
+  key: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  /** Show the group header even if no children are visible. */
+  defaultOpen?: boolean;
+  /** Sub-items the user can navigate to. */
+  items: Leaf[];
+};
+
+type NavEntry = Leaf | Group;
+
+const NAV: NavEntry[] = [
+  { kind: "leaf", href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { kind: "leaf", href: "/connections", label: "DB Manager", icon: Database, requires: "query:run" },
+  {
+    kind: "group",
+    key: "automations",
+    label: "Automations",
+    icon: Zap,
+    defaultOpen: true,
+    items: [
+      { kind: "leaf", href: "/flows", label: "Flow automation", icon: Workflow, requires: "query:run" },
+      { kind: "leaf", href: "/automations", label: "Query Email automation", icon: CalendarClock, requires: "query:run" },
+    ],
+  },
+  {
+    kind: "group",
+    key: "access",
+    label: "Access",
+    icon: ShieldCheck,
+    defaultOpen: true,
+    items: [
+      { kind: "leaf", href: "/users", label: "Users", icon: Users, requires: "admin" },
+      { kind: "leaf", href: "/teams", label: "Teams", icon: Network, requires: "admin" },
+      { kind: "leaf", href: "/roles", label: "Roles", icon: ShieldCheck, requires: "admin" },
+    ],
+  },
+  { kind: "leaf", href: "/credentials", label: "Credentials", icon: KeyRound, requires: "query:run" },
+  { kind: "leaf", href: "/settings", label: "Settings", icon: SettingsIcon, requires: "admin" },
 ];
 
-void CalendarClock;
-
-function canSee(item: NavItem, perms: Perms): boolean {
+function canSee(item: Leaf, perms: Perms): boolean {
   if (!item.requires) return true;
   if (item.requires === "admin") return perms.isSuperAdmin;
   if (perms.isSuperAdmin) return true;
@@ -92,10 +125,12 @@ function Sidebar({ perms, className }: { perms: Perms; className?: string }) {
         <Database className="h-5 w-5 text-primary" />
         <span className="font-semibold">DBConnector</span>
       </div>
-      <nav className="flex-1 p-3 space-y-0.5">
-        {NAV.filter((i) => canSee(i, perms)).map((item) => (
-          <NavLink key={item.href} item={item} />
-        ))}
+      <nav className="flex-1 p-3 space-y-0.5 overflow-y-auto">
+        {NAV.map((entry) => (entry.kind === "leaf" ? (
+          canSee(entry, perms) && <NavLink key={entry.href} item={entry} />
+        ) : (
+          <NavGroup key={entry.key} group={entry} perms={perms} />
+        )))}
       </nav>
       <div className="p-3 text-xs text-muted-foreground">
         v0.1.0 · {perms.isSuperAdmin ? "Admin" : "Member"}
@@ -127,7 +162,7 @@ function MobileSidebar({
   );
 }
 
-function NavLink({ item }: { item: NavItem }) {
+function NavLink({ item, indent }: { item: Leaf; indent?: boolean }) {
   const pathname = usePathname();
   const Icon = item.icon;
   const active = pathname === item.href || pathname.startsWith(item.href + "/");
@@ -135,15 +170,60 @@ function NavLink({ item }: { item: NavItem }) {
     <Link
       href={item.href}
       className={cn(
-        "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+        "flex items-center gap-2.5 rounded-md py-2 text-sm font-medium transition-colors",
+        indent ? "pl-9 pr-3" : "px-3",
         active
           ? "bg-primary/10 text-primary"
           : "text-muted-foreground hover:text-foreground hover:bg-accent"
       )}
     >
-      <Icon className="h-4 w-4" />
+      <Icon className={cn("h-4 w-4", indent && "h-3.5 w-3.5")} />
       {item.label}
     </Link>
+  );
+}
+
+/**
+ * Collapsable section. Auto-opens on first render if the current pathname is
+ * inside one of its children — saves users an extra click when they land on
+ * a deep page via bookmark.
+ */
+function NavGroup({ group, perms }: { group: Group; perms: Perms }) {
+  const pathname = usePathname();
+  const visible = group.items.filter((i) => canSee(i, perms));
+  const childActive = visible.some((i) => pathname === i.href || pathname.startsWith(i.href + "/"));
+  const [open, setOpen] = React.useState<boolean>(group.defaultOpen ?? false);
+  // If the user navigates into a child, ensure the group is open.
+  React.useEffect(() => {
+    if (childActive) setOpen(true);
+  }, [childActive]);
+  if (visible.length === 0) return null;
+  const Icon = group.icon;
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return (
+    <div className="space-y-0.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "w-full flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+          childActive
+            ? "text-foreground"
+            : "text-muted-foreground hover:text-foreground hover:bg-accent"
+        )}
+      >
+        <Icon className="h-4 w-4" />
+        <span className="flex-1 text-left">{group.label}</span>
+        <Chevron className="h-3.5 w-3.5 opacity-60" />
+      </button>
+      {open && (
+        <div className="space-y-0.5">
+          {visible.map((leaf) => (
+            <NavLink key={leaf.href} item={leaf} indent />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

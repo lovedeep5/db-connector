@@ -195,6 +195,16 @@ function pathsForTrigger(trigger: TriggerSpec, lastTestRun: TestRunResult | null
   if (trigger.type === "schedule") {
     return [{ template: "{{ $trigger.firedAt }}", preview: "ISO date" }];
   }
+  if (trigger.type === "s3.objectCreated") {
+    return [
+      { template: "{{ $trigger.bucket }}", preview: "bucket name" },
+      { template: "{{ $trigger.key }}", preview: "object key" },
+      { template: "{{ $trigger.size }}", preview: "bytes" },
+      { template: "{{ $trigger.lastModified }}", preview: "ISO date" },
+      { template: "{{ $trigger.etag }}", preview: "ETag" },
+      { template: "{{ $trigger.presignedUrl }}", preview: "GET url (15-min)" },
+    ];
+  }
   return [{ template: "{{ $trigger.startedBy }}", preview: "user id" }];
 }
 

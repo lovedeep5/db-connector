@@ -52,12 +52,27 @@ const SmtpSchema = z.object({
   from: z.string().min(1, "From address required"),
 });
 
+const S3Schema = z.object({
+  type: z.literal("s3"),
+  region: z.string().min(1, "AWS region required (e.g. us-east-1)"),
+  accessKeyId: z.string().min(1, "Access key required"),
+  secretAccessKey: z.string().min(1, "Secret key required"),
+  /**
+   * Optional custom endpoint for S3-compatible storage (MinIO, R2,
+   * Cloudflare R2, DigitalOcean Spaces, etc.). Leave blank for real AWS.
+   */
+  endpoint: z.string().optional(),
+  /** Optional default bucket — triggers/nodes can override per-use. */
+  defaultBucket: z.string().optional(),
+});
+
 const ConfigSchema = z.discriminatedUnion("type", [
   PostgresSchema,
   MySQLSchema,
   MongoSchema,
   OracleSchema,
   SmtpSchema,
+  S3Schema,
 ]);
 
 const NewConnectionSchema = z.object({
@@ -74,6 +89,12 @@ export async function testConfig(config: ConnectionConfig) {
   await requireUser();
   const cfg = ConfigSchema.parse(config);
   if (cfg.type === "smtp") return testSmtpConfig(cfg);
+  if (cfg.type === "s3") {
+    // Real `s3:HeadBucket` test lands with the S3 trigger work; for now just
+    // confirm the inputs parsed and let the user save. The trigger's first
+    // poll will surface any creds problem with a clear error.
+    return { ok: true, message: "Saved — auth will be verified by the S3 trigger on first poll." };
+  }
   const driver = createDriver(cfg);
   try {
     return await driver.test();
@@ -114,6 +135,7 @@ export async function createConnection(input: NewConnectionInput) {
   });
   if (data.config.type === "smtp") invalidateMailerCache();
   revalidatePath("/connections");
+  revalidatePath("/credentials");
 }
 
 export async function updateConnection(id: string, input: NewConnectionInput) {
@@ -139,6 +161,7 @@ export async function updateConnection(id: string, input: NewConnectionInput) {
     .where(eq(schema.connections.id, id));
   if (existing.type === "smtp" || data.config.type === "smtp") invalidateMailerCache();
   revalidatePath("/connections");
+  revalidatePath("/credentials");
 }
 
 export async function deleteConnection(id: string) {
@@ -149,9 +172,10 @@ export async function deleteConnection(id: string) {
     throw new Error("Only the creator (or an admin) can delete this connection.");
   }
   await db.delete(schema.connections).where(eq(schema.connections.id, id));
-  await disposeDriver(id);
+  await disposeDriver(id).catch(() => {});
   if (existing.type === "smtp") invalidateMailerCache();
   revalidatePath("/connections");
+  revalidatePath("/credentials");
 }
 
 // Re-export so the form can use the same Zod for client-side validation if needed.

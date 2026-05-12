@@ -38,12 +38,23 @@ export type SmtpConfig = {
   from: string;
 };
 
+export type S3Config = {
+  region: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  /** Custom endpoint for S3-compatible storage (MinIO, R2, etc.). */
+  endpoint?: string;
+  /** Optional default bucket; triggers/nodes may override per-use. */
+  defaultBucket?: string;
+};
+
 export type ConnectionConfig =
   | ({ type: "postgres" } & PostgresConfig)
   | ({ type: "mysql" } & MySQLConfig)
   | ({ type: "mongodb" } & MongoConfig)
   | ({ type: "oracle" } & OracleConfig)
-  | ({ type: "smtp" } & SmtpConfig);
+  | ({ type: "smtp" } & SmtpConfig)
+  | ({ type: "s3" } & S3Config);
 
 export type SchemaInfo = { name: string };
 
