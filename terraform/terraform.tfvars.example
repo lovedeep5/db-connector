@@ -1,0 +1,40 @@
+# Copy to `terraform.tfvars` and fill in your values.
+
+aws_region  = "us-east-1"
+name_prefix = "dbconnector"
+
+# ─── Your existing EKS networking ─────────────────────────────────────────
+vpc_id             = "vpc-0abcdef1234567890"
+private_subnet_ids = [
+  "subnet-aaaaaaaa",
+  "subnet-bbbbbbbb",
+]
+
+# Option A: just give the EKS cluster name; we derive its SG + OIDC.
+eks_cluster_name = "my-eks-cluster"
+
+# Option B (if you don't want to grant the IAM principal eks:DescribeCluster):
+# eks_node_security_group_id = "sg-0abcdef1234567890"
+
+# ─── RDS sizing (defaults are the cheapest viable Postgres) ───────────────
+# db_instance_class        = "db.t4g.micro"
+# db_engine_version        = "17.4"
+# db_storage_gb            = 20
+# db_max_storage_gb        = 100
+# db_backup_retention_days = 7
+# db_multi_az              = false   # set true for production HA
+
+# ─── Lifecycle ────────────────────────────────────────────────────────────
+# db_deletion_protection = true   # set true for production
+# db_skip_final_snapshot = false  # set false for production
+
+# ─── ECR ──────────────────────────────────────────────────────────────────
+# create_ecr           = true
+# ecr_repository_name  = "dbconnector"
+
+tags = {
+  Project     = "dbconnector"
+  Environment = "dev"
+  ManagedBy   = "terraform"
+  Owner       = "your-team"
+}

@@ -1,0 +1,45 @@
+# Dependencies
+node_modules
+
+# Build output
+.next
+out
+dist
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Environment files — NEVER commit
+.env
+.env.local
+.env.*.local
+
+# Local SQLite databases (legacy metadata store before AWS RDS)
+data/*.db
+data/*.db-journal
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+*.swo
+
+# Next.js / Vercel
+.vercel
+
+# Test / coverage artifacts (in case any are added later)
+coverage
+.nyc_output
+
+# Misc
+*.tgz
+
+# Build / export artifacts (e.g. dbconnector-poc.zip for shipping the POC)
+*.zip

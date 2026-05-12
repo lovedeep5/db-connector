@@ -1,0 +1,158 @@
+"use server";
+import { z } from "zod";
+import { revalidatePath } from "next/cache";
+import { and, eq } from "drizzle-orm";
+import { db, schema } from "@/lib/db/client";
+import { encryptJSON } from "@/lib/crypto";
+import { requireSuperAdmin, requireUser } from "@/lib/session";
+import { createDriver, disposeDriver } from "@/lib/drivers/factory";
+import { testSmtpConfig, invalidateMailerCache } from "@/lib/smtp/transport";
+import type { ConnectionConfig } from "@/lib/drivers/types";
+
+const PostgresSchema = z.object({
+  type: z.literal("postgres"),
+  host: z.string().min(1),
+  port: z.coerce.number().int().min(1).max(65535),
+  database: z.string().min(1),
+  user: z.string().min(1),
+  password: z.string().min(0),
+  ssl: z.coerce.boolean().optional(),
+});
+
+const MySQLSchema = z.object({
+  type: z.literal("mysql"),
+  host: z.string().min(1),
+  port: z.coerce.number().int().min(1).max(65535),
+  database: z.string().min(1),
+  user: z.string().min(1),
+  password: z.string().min(0),
+  ssl: z.coerce.boolean().optional(),
+});
+
+const MongoSchema = z.object({
+  type: z.literal("mongodb"),
+  url: z.string().min(1),
+  database: z.string().min(1),
+});
+
+const OracleSchema = z.object({
+  type: z.literal("oracle"),
+  connectString: z.string().min(1),
+  user: z.string().min(1),
+  password: z.string().min(0),
+});
+
+const SmtpSchema = z.object({
+  type: z.literal("smtp"),
+  host: z.string().min(1),
+  port: z.coerce.number().int().min(1).max(65535),
+  secure: z.coerce.boolean().default(false),
+  user: z.string().optional(),
+  password: z.string().optional(),
+  from: z.string().min(1, "From address required"),
+});
+
+const ConfigSchema = z.discriminatedUnion("type", [
+  PostgresSchema,
+  MySQLSchema,
+  MongoSchema,
+  OracleSchema,
+  SmtpSchema,
+]);
+
+const NewConnectionSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional().nullable(),
+  config: ConfigSchema,
+  visibility: z.enum(["private", "team", "everyone"]).default("private"),
+});
+
+export type NewConnectionInput = z.infer<typeof NewConnectionSchema>;
+
+/** Test a configuration without saving. Any signed-in user may test — they're typing the creds. */
+export async function testConfig(config: ConnectionConfig) {
+  await requireUser();
+  const cfg = ConfigSchema.parse(config);
+  if (cfg.type === "smtp") return testSmtpConfig(cfg);
+  const driver = createDriver(cfg);
+  try {
+    return await driver.test();
+  } finally {
+    await driver.close().catch(() => {});
+  }
+}
+
+/**
+ * Any signed-in user may create a *private* connection. Workspace-wide
+ * (`team` / `everyone`) connections still require the manage:connections
+ * permission, which only admins hold.
+ */
+export async function createConnection(input: NewConnectionInput) {
+  const user = await requireUser();
+  const data = NewConnectionSchema.parse(input);
+  if (data.visibility !== "private" && !user.isSuperAdmin) {
+    throw new Error("Only admins can create team or workspace-wide connections.");
+  }
+  // App-level name uniqueness: within the user's own visible set.
+  const [existing] = await db
+    .select()
+    .from(schema.connections)
+    .where(
+      and(
+        eq(schema.connections.name, data.name),
+        eq(schema.connections.createdBy, user.id)
+      )
+    );
+  if (existing) throw new Error("You already have a connection with this name.");
+  await db.insert(schema.connections).values({
+    name: data.name,
+    description: data.description ?? null,
+    type: data.config.type,
+    encryptedConfig: encryptJSON(data.config),
+    visibility: data.visibility,
+    createdBy: user.id,
+  });
+  if (data.config.type === "smtp") invalidateMailerCache();
+  revalidatePath("/connections");
+}
+
+export async function updateConnection(id: string, input: NewConnectionInput) {
+  const user = await requireUser();
+  const [existing] = await db.select().from(schema.connections).where(eq(schema.connections.id, id));
+  if (!existing) throw new Error("Connection not found");
+  if (existing.createdBy !== user.id && !user.isSuperAdmin) {
+    throw new Error("Only the creator (or an admin) can edit this connection.");
+  }
+  const data = NewConnectionSchema.parse(input);
+  if (data.visibility !== "private" && !user.isSuperAdmin) {
+    throw new Error("Only admins can promote a connection to team or everyone.");
+  }
+  await db
+    .update(schema.connections)
+    .set({
+      name: data.name,
+      description: data.description ?? null,
+      type: data.config.type,
+      encryptedConfig: encryptJSON(data.config),
+      visibility: data.visibility,
+    })
+    .where(eq(schema.connections.id, id));
+  if (existing.type === "smtp" || data.config.type === "smtp") invalidateMailerCache();
+  revalidatePath("/connections");
+}
+
+export async function deleteConnection(id: string) {
+  const user = await requireUser();
+  const [existing] = await db.select().from(schema.connections).where(eq(schema.connections.id, id));
+  if (!existing) return;
+  if (existing.createdBy !== user.id && !user.isSuperAdmin) {
+    throw new Error("Only the creator (or an admin) can delete this connection.");
+  }
+  await db.delete(schema.connections).where(eq(schema.connections.id, id));
+  await disposeDriver(id);
+  if (existing.type === "smtp") invalidateMailerCache();
+  revalidatePath("/connections");
+}
+
+// Re-export so the form can use the same Zod for client-side validation if needed.
+export const _ConfigSchemaForReuse = ConfigSchema;

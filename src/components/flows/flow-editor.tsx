@@ -1,0 +1,871 @@
+"use client";
+import * as React from "react";
+import {
+  ReactFlow,
+  Background,
+  Controls,
+  ControlButton,
+  MiniMap,
+  ReactFlowProvider,
+  useReactFlow,
+  useNodesState,
+  useEdgesState,
+  addEdge,
+  type Connection,
+  type Edge,
+  type EdgeTypes,
+  type Node,
+  type NodeTypes,
+  type NodeChange,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { useRouter } from "next/navigation";
+import { useTheme } from "next-themes";
+import { toast } from "sonner";
+import {
+  Loader2, Save, ArrowLeft, Webhook, Copy, Play, AlertCircle, CheckCircle2,
+  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
+  Wand2, Maximize2,
+} from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CanvasNode } from "./canvas-node";
+import { DeletableEdge } from "./deletable-edge";
+import { NodePalette, NODE_DRAG_TYPE } from "./node-palette";
+import { NodeConfig } from "./node-config";
+import { TRIGGER_CATALOG, findCatalog } from "./node-catalog";
+import { applyDagreLayout } from "./auto-layout";
+import { createFlow, updateFlow } from "@/server/actions/flows";
+import { testRunFlowAction, testRunUpToNodeAction } from "@/server/actions/flow-test";
+import type { TestNodeResult, TestRunResult } from "@/server/services/flow-test-runner";
+import type { FlowDefinition, FlowNode as DefNode, FlowEdge, TriggerSpec } from "@/lib/flows/types";
+import { buildAvailableRefs } from "./refs-builder";
+
+type Conn = { id: string; name: string; type: string };
+type Team = { id: string; name: string };
+
+type FlowMeta = {
+  id?: string;
+  name: string;
+  description?: string | null;
+  isActive: boolean;
+  visibility: "private" | "team" | "everyone";
+  sharedWithTeamId?: string | null;
+  executionMode: "sequential" | "parallel";
+  maxConcurrentRuns: number;
+  defaultNodeTimeoutMs: number;
+  webhookSecret?: string | null;
+};
+
+const nodeTypes: NodeTypes = { dbcNode: CanvasNode };
+const edgeTypes: EdgeTypes = { deletable: DeletableEdge };
+const TRIGGER_ID = "__trigger__";
+
+export function FlowEditor(props: {
+  mode: "create" | "edit";
+  flowId?: string;
+  initial?: FlowDefinition;
+  meta?: FlowMeta;
+  connections: Conn[];
+  myTeams: Team[];
+}) {
+  // ReactFlowProvider is required so that `useReactFlow()` works inside the
+  // editor (we use it for screen-to-flow coordinate conversion on drop).
+  return (
+    <ReactFlowProvider>
+      <FlowEditorInner {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function FlowEditorInner({
+  mode,
+  flowId,
+  initial,
+  meta: initialMeta,
+  connections,
+  myTeams,
+}: {
+  mode: "create" | "edit";
+  flowId?: string;
+  initial?: FlowDefinition;
+  meta?: FlowMeta;
+  connections: Conn[];
+  myTeams: Team[];
+}) {
+  const router = useRouter();
+  const { screenToFlowPosition, fitView } = useReactFlow();
+  // React Flow 12 themes its MiniMap, Controls and edge defaults from this prop.
+  // Without it the controls render as bright white tiles on the dark theme.
+  const { resolvedTheme } = useTheme();
+  const colorMode: "dark" | "light" = resolvedTheme === "dark" ? "dark" : "light";
+
+  // Bring the flow definition into React Flow's node/edge state.
+  const [meta, setMeta] = React.useState<FlowMeta>(
+    initialMeta ?? {
+      name: "Untitled flow",
+      description: "",
+      isActive: true,
+      visibility: "private",
+      executionMode: "parallel",
+      maxConcurrentRuns: 10,
+      defaultNodeTimeoutMs: 60_000,
+    }
+  );
+  const [trigger, setTrigger] = React.useState<TriggerSpec>(
+    initial?.trigger ?? { type: "schedule", config: { cron: "0 9 * * *" } }
+  );
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(defaultNodes(initial, trigger));
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(
+    (initial?.edges ?? []).map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      sourceHandle: e.sourcePort ?? null,
+      type: "deletable",
+    }))
+  );
+  const [selectedId, setSelectedId] = React.useState<string | null>(TRIGGER_ID);
+  const [lastTestRun, setLastTestRun] = React.useState<TestRunResult | null>(null);
+  const [paletteOpen, setPaletteOpen] = React.useState(true);
+  const [inspectorOpen, setInspectorOpen] = React.useState(true);
+  // Lifted up here so the `lastTestRun`/`runningNodeId` sync effect below
+  // sees it. Set by the streaming test runner.
+  const [runningNodeId, setRunningNodeId] = React.useState<string | null>(null);
+
+  const handleConnect = React.useCallback(
+    (c: Connection) => {
+      if (!c.source || !c.target) return;
+      setEdges((es) =>
+        addEdge({ ...c, id: `e_${c.source}_${c.target}_${Date.now()}`, type: "deletable" }, es)
+      );
+    },
+    [setEdges]
+  );
+
+  const handleNodesChange = React.useCallback(
+    (changes: NodeChange[]) => {
+      const filtered = changes.filter((c) => !(c.type === "remove" && c.id === TRIGGER_ID));
+      onNodesChange(filtered);
+    },
+    [onNodesChange]
+  );
+
+  // Re-arrange every node into a clean left-to-right DAG layout via Dagre.
+  // Multi-port nodes (if/else, loop) untangle automatically because dagre
+  // only cares about source→target relationships, not port semantics.
+  // Then refit so the new layout fills the viewport.
+  const handleBeautify = React.useCallback(() => {
+    setNodes((current) => applyDagreLayout(current, edges, { direction: "LR" }));
+    // Defer fitView until after React paints the new positions.
+    setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 50);
+  }, [edges, setNodes, fitView]);
+
+  const handleFitAll = React.useCallback(() => {
+    fitView({ padding: 0.2, duration: 250 });
+  }, [fitView]);
+
+  // ── Drag-and-drop from palette to canvas ────────────────────────────
+  const onDragOver = React.useCallback((e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes(NODE_DRAG_TYPE)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+    }
+  }, []);
+
+  const onDrop = React.useCallback(
+    (e: React.DragEvent) => {
+      const type = e.dataTransfer.getData(NODE_DRAG_TYPE);
+      if (!type) return;
+      e.preventDefault();
+      const cat = findCatalog(type);
+      if (!cat) return;
+      const position = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      const id = `${type.replace(/\W/g, "_")}_${Math.random().toString(36).slice(2, 7)}`;
+      setNodes((ns) => [
+        ...ns,
+        {
+          id,
+          type: "dbcNode",
+          position,
+          data: { label: cat.label, type, isTrigger: false, config: defaultConfigFor(type) },
+        },
+      ]);
+      setSelectedId(id);
+    },
+    [screenToFlowPosition, setNodes]
+  );
+
+  const addNode = (type: string) => {
+    const cat = findCatalog(type);
+    if (!cat) return;
+    const id = `${type.replace(/\W/g, "_")}_${Math.random().toString(36).slice(2, 7)}`;
+    setNodes((ns) => [
+      ...ns,
+      {
+        id,
+        type: "dbcNode",
+        position: { x: 280 + (ns.length - 1) * 240, y: 160 + ((ns.length - 1) % 3) * 80 },
+        data: { label: cat.label, type, isTrigger: false, config: defaultConfigFor(type) },
+      },
+    ]);
+    setSelectedId(id);
+  };
+
+  const selectedNode = nodes.find((n) => n.id === selectedId);
+  const selectedTrigger = selectedId === TRIGGER_ID;
+
+  const onConfigChange = (cfg: Record<string, unknown>) => {
+    if (selectedTrigger) {
+      setTrigger((t) => ({ type: t.type, config: cfg } as TriggerSpec));
+      return;
+    }
+    if (!selectedNode) return;
+    setNodes((ns) =>
+      ns.map((n) => (n.id === selectedNode.id ? { ...n, data: { ...n.data, config: cfg, summary: summarise(n.data.type as string, cfg) } } : n))
+    );
+  };
+
+  const onDeleteSelected = () => {
+    if (!selectedNode || selectedTrigger) return;
+    setNodes((ns) => ns.filter((n) => n.id !== selectedNode.id));
+    setEdges((es) => es.filter((e) => e.source !== selectedNode.id && e.target !== selectedNode.id));
+    setSelectedId(TRIGGER_ID);
+  };
+
+  const onTriggerKindChange = (kind: TriggerSpec["type"]) => {
+    const next: TriggerSpec =
+      kind === "schedule"
+        ? { type: "schedule", config: { cron: "0 9 * * *" } }
+        : kind === "webhook"
+        ? { type: "webhook", config: {} }
+        : { type: "manual", config: {} as never };
+    setTrigger(next);
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.id === TRIGGER_ID
+          ? { ...n, data: { ...n.data, type: kind, label: findCatalog(kind)?.label ?? kind } }
+          : n
+      )
+    );
+  };
+
+  // Canvas nodes get a `lastRunStatus` annotation when a test run completes,
+  // and an `isRunning` flag during a live stream so they can pulse/spinner
+  // while their step is executing on the server.
+  React.useEffect(() => {
+    setNodes((ns) =>
+      ns.map((n) => {
+        if (n.id === TRIGGER_ID) return n;
+        const r = lastTestRun?.nodes.find((x) => x.nodeId === n.id);
+        const isRunning = runningNodeId === n.id;
+        return { ...n, data: { ...n.data, lastRunStatus: r?.status, isRunning } };
+      })
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastTestRun, runningNodeId]);
+
+  const currentDefinition = React.useCallback<() => FlowDefinition>(() => ({
+    version: 1,
+    trigger,
+    nodes: nodes
+      .filter((n) => n.id !== TRIGGER_ID)
+      .map<DefNode>((n) => ({
+        id: n.id,
+        type: (n.data as Record<string, unknown>).type as string,
+        config: ((n.data as Record<string, unknown>).config as Record<string, unknown>) ?? {},
+        position: n.position,
+      })),
+    edges: edges.map<FlowEdge>((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      sourcePort: e.sourceHandle ?? undefined,
+    })),
+  }), [nodes, edges, trigger]);
+
+  // ── Save ────────────────────────────────────────────────────────────
+  const [saving, setSaving] = React.useState(false);
+  const save = async () => {
+    setSaving(true);
+    try {
+      const def = currentDefinition();
+      if (mode === "create") {
+        const newId = await createFlow({ ...meta, definition: def });
+        toast.success("Flow created");
+        router.push(`/flows/${newId}/edit`);
+      } else if (flowId) {
+        await updateFlow(flowId, { ...meta, definition: def });
+        toast.success("Updated");
+      }
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ── Test run (no persistence) ───────────────────────────────────────
+  const [testing, setTesting] = React.useState(false);
+  // runningNodeId is declared near the top of this component so the
+  // node-data sync effect can see it.
+  const testRun = async () => {
+    if (nodes.filter((n) => n.id !== TRIGGER_ID).length === 0) {
+      toast.error("Add at least one action before running");
+      return;
+    }
+    setTesting(true);
+    setRunningNodeId(null);
+    // Clear stale per-node statuses before a fresh run so the user sees the
+    // live progression rather than the previous run's ring colors.
+    setLastTestRun(null);
+    try {
+      await runTestStream(
+        { definition: currentDefinition(), defaultNodeTimeoutMs: meta.defaultNodeTimeoutMs },
+        {
+          onStart: (id) => setRunningNodeId(id),
+          onEnd: () => setRunningNodeId(null),
+          onDone: (result) => {
+            setLastTestRun(result);
+            if (result.status === "success") {
+              toast.success(`Test run OK · ${result.durationMs}ms`);
+            } else {
+              toast.error(`Test failed: ${result.errorMessage ?? "unknown error"}`);
+              const failed = result.nodes.find((n) => n.status === "error");
+              if (failed) setSelectedId(failed.nodeId);
+            }
+          },
+        }
+      );
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setTesting(false);
+      setRunningNodeId(null);
+    }
+  };
+
+  // Step-level test run (current selected node + its ancestors).
+  const [steppingId, setSteppingId] = React.useState<string | null>(null);
+  const runStep = async () => {
+    if (!selectedNode || selectedTrigger) return;
+    setSteppingId(selectedNode.id);
+    try {
+      const result = await testRunUpToNodeAction({
+        definition: currentDefinition(),
+        targetNodeId: selectedNode.id,
+        defaultNodeTimeoutMs: meta.defaultNodeTimeoutMs,
+      });
+      setLastTestRun(result);
+      if (result.status === "success") {
+        toast.success(`Step "${selectedNode.id}" ran OK · ${result.durationMs}ms`);
+      } else {
+        toast.error(`Step failed: ${result.errorMessage ?? "unknown error"}`);
+      }
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSteppingId(null);
+    }
+  };
+
+  // Available references for the selected node — recomputed when the canvas,
+  // selection, or test-run output changes.
+  const availableRefs = React.useMemo(
+    () =>
+      buildAvailableRefs({
+        definition: currentDefinition(),
+        selectedNodeId: selectedTrigger ? null : selectedNode?.id ?? null,
+        lastTestRun,
+      }),
+    [currentDefinition, selectedNode, selectedTrigger, lastTestRun]
+  );
+
+  return (
+    <div className="flex flex-col h-full">
+      <Header
+        meta={meta}
+        setMeta={setMeta}
+        onBack={() => router.push("/flows")}
+        onSave={save}
+        saving={saving}
+        onTestRun={testRun}
+        testing={testing}
+        lastTestRun={lastTestRun}
+      />
+
+      <div className="flex flex-1 overflow-hidden">
+        {paletteOpen ? (
+          <aside className="w-52 border-r flex flex-col bg-card/40">
+            <div className="flex items-center justify-between px-2 py-1.5 border-b">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Nodes</span>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6"
+                onClick={() => setPaletteOpen(false)}
+                title="Collapse"
+              >
+                <PanelLeftClose className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <NodePalette onAdd={addNode} />
+            </div>
+          </aside>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            className="w-7 border-r bg-card/40 flex flex-col items-center pt-2 gap-2 hover:bg-accent"
+            title="Show node palette"
+          >
+            <PanelLeftOpen className="h-3.5 w-3.5" />
+            <span className="text-[9px] text-muted-foreground [writing-mode:vertical-rl] rotate-180">Nodes</span>
+          </button>
+        )}
+
+        <div className="flex-1 min-w-0" onDragOver={onDragOver} onDrop={onDrop}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={handleNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={handleConnect}
+            onNodeClick={(_e, n) => setSelectedId(n.id)}
+            onPaneClick={() => setSelectedId(null)}
+            nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
+            defaultEdgeOptions={{ type: "deletable" }}
+            colorMode={colorMode}
+            fitView
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background gap={20} size={1} />
+            <MiniMap pannable zoomable />
+            <Controls>
+              <ControlButton onClick={handleBeautify} title="Auto-layout (Beautify)">
+                <Wand2 />
+              </ControlButton>
+              <ControlButton onClick={handleFitAll} title="Fit all nodes in view">
+                <Maximize2 />
+              </ControlButton>
+            </Controls>
+          </ReactFlow>
+        </div>
+
+        {!inspectorOpen && (
+          <button
+            type="button"
+            onClick={() => setInspectorOpen(true)}
+            className="w-7 border-l bg-card/40 flex flex-col items-center pt-2 gap-2 hover:bg-accent"
+            title="Show inspector"
+          >
+            <PanelRightOpen className="h-3.5 w-3.5" />
+            <span className="text-[9px] text-muted-foreground [writing-mode:vertical-rl] rotate-180">Inspector</span>
+          </button>
+        )}
+        {inspectorOpen && (
+        <aside className="w-80 border-l flex flex-col bg-card/40">
+          <Tabs defaultValue="config" className="h-full flex flex-col">
+            <div className="flex items-center justify-between px-2 pt-2">
+              <TabsList>
+                <TabsTrigger value="config">Inspector</TabsTrigger>
+                <TabsTrigger value="output">Output</TabsTrigger>
+                <TabsTrigger value="settings">Settings</TabsTrigger>
+              </TabsList>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6"
+                onClick={() => setInspectorOpen(false)}
+                title="Collapse"
+              >
+                <PanelRightClose className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <TabsContent value="config" className="flex-1 overflow-y-auto m-0">
+              {selectedTrigger ? (
+                <div className="p-4 space-y-3">
+                  <Label>Trigger</Label>
+                  <Select value={trigger.type} onValueChange={(v) => onTriggerKindChange(v as TriggerSpec["type"])}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {TRIGGER_CATALOG.map((t) => (
+                        <SelectItem key={t.type} value={t.type}>{t.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <NodeConfig
+                    nodeId={TRIGGER_ID}
+                    nodeType={trigger.type}
+                    triggerKind={trigger.type}
+                    config={trigger.config as Record<string, unknown>}
+                    onChange={onConfigChange}
+                    connections={connections}
+                  />
+                  {mode === "edit" && trigger.type === "webhook" && (
+                    <WebhookUrlBlock flowId={flowId!} secret={meta.webhookSecret ?? ""} />
+                  )}
+                </div>
+              ) : selectedNode ? (
+                <NodeConfig
+                  nodeId={selectedNode.id}
+                  nodeType={(selectedNode.data as Record<string, unknown>).type as string}
+                  config={((selectedNode.data as Record<string, unknown>).config as Record<string, unknown>) ?? {}}
+                  onChange={onConfigChange}
+                  onDelete={onDeleteSelected}
+                  connections={connections}
+                  availableRefs={availableRefs}
+                  onRunStep={runStep}
+                  runningStep={steppingId === selectedNode.id}
+                />
+              ) : (
+                <div className="p-4 text-sm text-muted-foreground">Click a node to configure it.</div>
+              )}
+            </TabsContent>
+            <TabsContent value="output" className="m-0 p-4">
+              <OutputPanel
+                selectedNodeId={selectedTrigger ? null : selectedNode?.id ?? null}
+                result={lastTestRun}
+              />
+            </TabsContent>
+            <TabsContent value="settings" className="m-0 p-4">
+              <SettingsForm meta={meta} setMeta={setMeta} myTeams={myTeams} />
+            </TabsContent>
+          </Tabs>
+        </aside>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Header({
+  meta, setMeta, onBack, onSave, saving, onTestRun, testing, lastTestRun,
+}: {
+  meta: FlowMeta;
+  setMeta: (m: FlowMeta) => void;
+  onBack: () => void;
+  onSave: () => void;
+  saving: boolean;
+  onTestRun: () => void;
+  testing: boolean;
+  lastTestRun: TestRunResult | null;
+}) {
+  return (
+    <div className="border-b p-3 flex items-center gap-3 bg-card/40">
+      <Button variant="ghost" size="icon" onClick={onBack}><ArrowLeft className="h-4 w-4" /></Button>
+      <Input
+        value={meta.name}
+        onChange={(e) => setMeta({ ...meta, name: e.target.value })}
+        className="max-w-md font-medium"
+        placeholder="Flow name"
+      />
+      <Badge variant={meta.isActive ? "success" : "secondary"} className="text-[10px]">
+        {meta.isActive ? "active" : "paused"}
+      </Badge>
+      {lastTestRun && (
+        <Badge variant={lastTestRun.status === "success" ? "success" : "destructive"} className="gap-1">
+          {lastTestRun.status === "success" ? <CheckCircle2 className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
+          test {lastTestRun.status} · {lastTestRun.durationMs}ms
+        </Badge>
+      )}
+      <div className="flex-1" />
+      <Button variant="outline" onClick={onTestRun} disabled={testing}>
+        {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} Test run
+      </Button>
+      <Button onClick={onSave} disabled={saving}>
+        {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
+      </Button>
+    </div>
+  );
+}
+
+function OutputPanel({ selectedNodeId, result }: { selectedNodeId: string | null; result: TestRunResult | null }) {
+  if (!result) {
+    return <p className="text-sm text-muted-foreground">Run the flow with <strong>Test run</strong> to see per-node output here.</p>;
+  }
+  if (!selectedNodeId) {
+    return (
+      <div className="space-y-2 text-sm">
+        <p className="text-muted-foreground">Click a node on the canvas to see its result.</p>
+        <ul className="space-y-1 mt-3">
+          {result.nodes.map((n) => (
+            <li key={n.nodeId} className="flex items-center gap-2 text-xs">
+              <StatusDot status={n.status} />
+              <span className="font-mono">{n.nodeId}</span>
+              <span className="text-muted-foreground">{n.nodeType}</span>
+              <span className="text-muted-foreground ml-auto">{n.durationMs}ms</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  const nodeResult = result.nodes.find((n) => n.nodeId === selectedNodeId);
+  if (!nodeResult) {
+    return <p className="text-xs text-muted-foreground">This node hasn&apos;t run yet (the flow stopped before reaching it).</p>;
+  }
+  return <NodeRunDetail r={nodeResult} />;
+}
+
+function NodeRunDetail({ r }: { r: TestNodeResult }) {
+  return (
+    <div className="space-y-3 text-xs">
+      <div className="flex items-center gap-2">
+        <StatusDot status={r.status} />
+        <span className="font-mono">{r.nodeId}</span>
+        <Badge variant="outline" className="text-[10px]">{r.nodeType}</Badge>
+        <span className="text-muted-foreground ml-auto">{r.durationMs}ms</span>
+      </div>
+      {r.errorMessage && (
+        <pre className="bg-destructive/10 text-destructive p-2 rounded whitespace-pre-wrap">{r.errorMessage}</pre>
+      )}
+      {r.logs && r.logs.length > 0 && (
+        <details open>
+          <summary className="cursor-pointer text-muted-foreground">logs ({r.logs.length})</summary>
+          <pre className="mt-1 p-2 bg-muted rounded overflow-x-auto whitespace-pre-wrap">{r.logs.join("\n")}</pre>
+        </details>
+      )}
+      {r.input !== undefined && (
+        <details>
+          <summary className="cursor-pointer text-muted-foreground">input</summary>
+          <pre className="mt-1 p-2 bg-muted rounded overflow-x-auto whitespace-pre">{JSON.stringify(r.input, null, 2)}</pre>
+        </details>
+      )}
+      {r.output !== undefined && (
+        <details open>
+          <summary className="cursor-pointer text-muted-foreground">output</summary>
+          <pre className="mt-1 p-2 bg-muted rounded overflow-x-auto whitespace-pre">{JSON.stringify(r.output, null, 2)}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function StatusDot({ status }: { status: "success" | "error" | "skipped" }) {
+  if (status === "success") return <span className="h-2 w-2 rounded-full bg-emerald-500" />;
+  if (status === "error") return <span className="h-2 w-2 rounded-full bg-destructive" />;
+  return <span className="h-2 w-2 rounded-full bg-muted-foreground/40" />;
+}
+
+function SettingsForm({
+  meta, setMeta, myTeams,
+}: {
+  meta: FlowMeta;
+  setMeta: (m: FlowMeta) => void;
+  myTeams: Team[];
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <Label>Description</Label>
+        <Textarea rows={2} value={meta.description ?? ""} onChange={(e) => setMeta({ ...meta, description: e.target.value })} />
+      </div>
+      <div className="flex items-center gap-2">
+        <Switch checked={meta.isActive} onCheckedChange={(v) => setMeta({ ...meta, isActive: v })} />
+        <Label>Active</Label>
+      </div>
+
+      <div className="space-y-1">
+        <Label>Execution mode</Label>
+        <Select value={meta.executionMode} onValueChange={(v) => setMeta({ ...meta, executionMode: v as "parallel" | "sequential" })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="parallel">Parallel — up to N runs at once</SelectItem>
+            <SelectItem value="sequential">Sequential — only one run at a time</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label>Max concurrent runs</Label>
+          <Input
+            type="number"
+            value={meta.maxConcurrentRuns}
+            disabled={meta.executionMode === "sequential"}
+            onChange={(e) => setMeta({ ...meta, maxConcurrentRuns: Number(e.target.value) })}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label>Default node timeout (ms)</Label>
+          <Input
+            type="number"
+            value={meta.defaultNodeTimeoutMs}
+            onChange={(e) => setMeta({ ...meta, defaultNodeTimeoutMs: Number(e.target.value) })}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        <Label>Visibility</Label>
+        <Select value={meta.visibility} onValueChange={(v) => setMeta({ ...meta, visibility: v as FlowMeta["visibility"] })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="private">Private — only you</SelectItem>
+            <SelectItem value="team" disabled={myTeams.length === 0}>Share with a team</SelectItem>
+            <SelectItem value="everyone">Everyone in the workspace</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      {meta.visibility === "team" && (
+        <div className="space-y-1">
+          <Label>Team</Label>
+          <Select value={meta.sharedWithTeamId ?? ""} onValueChange={(v) => setMeta({ ...meta, sharedWithTeamId: v })}>
+            <SelectTrigger><SelectValue placeholder="Pick a team" /></SelectTrigger>
+            <SelectContent>
+              {myTeams.map((t) => <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WebhookUrlBlock({ flowId, secret }: { flowId: string; secret: string }) {
+  const [origin, setOrigin] = React.useState("");
+  React.useEffect(() => { setOrigin(window.location.origin); }, []);
+  const url = `${origin}/api/flows/webhook/${flowId}?secret=${secret}`;
+  return (
+    <div className="space-y-2 border-t pt-3">
+      <Label className="flex items-center gap-1"><Webhook className="h-3 w-3" /> Webhook URL</Label>
+      <div className="flex gap-1">
+        <Input value={url} readOnly className="font-mono text-xs" />
+        <Button
+          size="icon"
+          variant="outline"
+          onClick={() => { navigator.clipboard.writeText(url); toast.success("Copied"); }}
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      <p className="text-[10px] text-muted-foreground">
+        POST any JSON to this URL to trigger the flow. The body is available as <code>{`{{ $trigger.body }}`}</code>.
+      </p>
+    </div>
+  );
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────
+
+function defaultNodes(def?: FlowDefinition, trigger?: TriggerSpec): Node[] {
+  const triggerKind = def?.trigger.type ?? trigger?.type ?? "schedule";
+  const triggerNode: Node = {
+    id: TRIGGER_ID,
+    type: "dbcNode",
+    position: { x: 40, y: 160 },
+    data: { label: findCatalog(triggerKind)?.label ?? triggerKind, type: triggerKind, isTrigger: true },
+    deletable: false,
+    draggable: false,
+  };
+  const others: Node[] = (def?.nodes ?? []).map((n) => ({
+    id: n.id,
+    type: "dbcNode",
+    position: n.position ?? { x: 280, y: 160 },
+    data: {
+      label: findCatalog(n.type)?.label ?? n.type,
+      type: n.type,
+      isTrigger: false,
+      config: n.config,
+      summary: summarise(n.type, n.config),
+    },
+  }));
+  return [triggerNode, ...others];
+}
+
+/**
+ * POSTs the flow definition to /api/flows/test-stream and reads the NDJSON
+ * response, dispatching `nodeStart`, `nodeEnd` and `done` events to the
+ * caller. Each chunk is one JSON line.
+ */
+async function runTestStream(
+  body: { definition: FlowDefinition; defaultNodeTimeoutMs?: number; targetNodeId?: string },
+  handlers: {
+    onStart: (nodeId: string) => void;
+    onEnd: (nodeId: string) => void;
+    onDone: (result: TestRunResult) => void;
+  }
+) {
+  const res = await fetch("/api/flows/test-stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `Stream failed: ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  // NDJSON: one event per line. The trailing partial line stays in `buf`
+  // until the next chunk completes it.
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line) continue;
+      let event: unknown;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const e = event as { type?: string; nodeId?: string; result?: unknown; message?: string };
+      if (e.type === "nodeStart" && e.nodeId) handlers.onStart(e.nodeId);
+      else if (e.type === "nodeEnd") {
+        const r = e.result as { nodeId?: string } | undefined;
+        if (r?.nodeId) handlers.onEnd(r.nodeId);
+      } else if (e.type === "done") {
+        handlers.onDone(e.result as TestRunResult);
+      } else if (e.type === "fatal") {
+        throw new Error(e.message ?? "Test run failed");
+      }
+    }
+  }
+}
+
+function defaultConfigFor(type: string): Record<string, unknown> {
+  switch (type) {
+    case "db.query": return { connectionId: "", statement: "select 1;" };
+    case "http.request": return { method: "GET", url: "https://api.example.com/", parseJson: true };
+    case "email.send": return { to: "", subject: "Report", html: "<p>Hi,</p>" };
+    case "transform.toFile": return { filename: "report", format: "csv" };
+    case "code.js": return { code: "return $input;", timeoutMs: 30_000 };
+    case "control.ifElse": return { expression: "$input.rowCount > 0", timeoutMs: 5_000 };
+    case "transform.filter": return { predicate: "$item.active === true", timeoutMs: 10_000 };
+    case "transform.setVariable": return { name: "myVar", value: "" };
+    case "transform.extractPath": return { path: "body" };
+    case "control.delay": return { durationMs: 1_000 };
+    case "io.downloadFile": return {
+      url: "https://example.com/data.csv",
+      method: "GET",
+      mode: "auto",
+      maxBytes: 100 * 1024 * 1024,
+      timeoutMs: 60_000,
+    };
+    default: return {};
+  }
+}
+
+function summarise(type: string, cfg: Record<string, unknown>): string {
+  if (type === "db.query") return (cfg.statement as string ?? "").slice(0, 40);
+  if (type === "http.request") return `${cfg.method ?? "GET"} ${(cfg.url as string ?? "").slice(0, 30)}`;
+  if (type === "email.send") return `→ ${cfg.to ?? ""}`;
+  if (type === "transform.toFile") return `${cfg.filename ?? "report"}.${cfg.format ?? "csv"}`;
+  if (type === "code.js") return "JS snippet";
+  return "";
+}
