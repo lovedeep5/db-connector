@@ -43,6 +43,20 @@ export function MonacoEditor({
         tabSize: 2,
         automaticLayout: true,
         padding: { top: 12 },
+        // Critical: render Monaco's IntelliSense + parameter-hint widgets at
+        // the document body level instead of inside the editor DOM. The
+        // Inspector panel has overflow:hidden, so without this the popup
+        // gets clipped and (worse) stays active while invisible. With it,
+        // the popup appears above all panels as expected.
+        fixedOverflowWidgets: true,
+        // Don't auto-format on type/paste — keeps the user's spacing exactly
+        // as typed (otherwise `const x = 1` may get re-spaced mid-typing).
+        formatOnType: false,
+        formatOnPaste: false,
+        // Suggestions are useful — let only Tab / Enter accept them so other
+        // typed characters (especially space) always pass straight through.
+        acceptSuggestionOnCommitCharacter: false,
+        acceptSuggestionOnEnter: "smart",
       }}
     />
   );

@@ -490,6 +490,16 @@ function FlowEditorInner({
             colorMode={colorMode}
             fitView
             proOptions={{ hideAttribution: true }}
+            // Disable React Flow's global keyboard shortcuts. Default
+            // panActivationKeyCode="Space" and deleteKeyCode=["Backspace",
+            // "Delete"] attach window-level listeners that preventDefault on
+            // those keys — which silently ate spaces (and made backspace
+            // sometimes delete the selected canvas node) when typing in the
+            // Inspector's Monaco editors. Nodes can still be deleted via
+            // the trash icon on a selected edge or the Remove button in
+            // the node config panel.
+            panActivationKeyCode={null}
+            deleteKeyCode={null}
           >
             <Background gap={20} size={1} />
             <MiniMap pannable zoomable />
