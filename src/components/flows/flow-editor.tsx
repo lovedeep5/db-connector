@@ -134,6 +134,41 @@ function FlowEditorInner({
     }))
   );
   const [selectedId, setSelectedId] = React.useState<string | null>(TRIGGER_ID);
+
+  // ── Undo / redo ────────────────────────────────────────────────────────
+  // History stack snapshotted at structural change boundaries (add / remove
+  // node, end-of-drag, edge add/remove). Per-keystroke config edits aren't
+  // snapshotted — they're too noisy and are saved explicitly via Save.
+  type Snapshot = { nodes: Node[]; edges: Edge[] };
+  const history = React.useRef<{ past: Snapshot[]; future: Snapshot[] }>({
+    past: [],
+    future: [],
+  });
+  const HISTORY_MAX = 50;
+  const captureSnapshot = React.useCallback(() => {
+    history.current.past.push({ nodes: [...nodes], edges: [...edges] });
+    if (history.current.past.length > HISTORY_MAX) history.current.past.shift();
+    history.current.future = [];
+  }, [nodes, edges]);
+  const undo = React.useCallback(() => {
+    const prev = history.current.past.pop();
+    if (!prev) return;
+    history.current.future.push({ nodes: [...nodes], edges: [...edges] });
+    setNodes(prev.nodes);
+    setEdges(prev.edges);
+  }, [nodes, edges, setNodes, setEdges]);
+  const redo = React.useCallback(() => {
+    const next = history.current.future.pop();
+    if (!next) return;
+    history.current.past.push({ nodes: [...nodes], edges: [...edges] });
+    setNodes(next.nodes);
+    setEdges(next.edges);
+  }, [nodes, edges, setNodes, setEdges]);
+  // Select-every-node helper, used by Ctrl+A.
+  const selectAll = React.useCallback(() => {
+    setNodes((ns) => ns.map((n) => (n.selected ? n : { ...n, selected: true })));
+    setEdges((es) => es.map((e) => (e.selected ? e : { ...e, selected: true })));
+  }, [setNodes, setEdges]);
   const [lastTestRun, setLastTestRun] = React.useState<TestRunResult | null>(null);
   const [paletteOpen, setPaletteOpen] = React.useState(true);
   const [inspectorOpen, setInspectorOpen] = React.useState(true);
@@ -154,10 +189,63 @@ function FlowEditorInner({
   const handleNodesChange = React.useCallback(
     (changes: NodeChange[]) => {
       const filtered = changes.filter((c) => !(c.type === "remove" && c.id === TRIGGER_ID));
+      // Snapshot history before applying any structural change. We treat
+      // `add` / `remove` / drag-stop as structural; `position` mid-drag and
+      // pure `select` changes are too chatty to record.
+      const structural = filtered.some(
+        (c) =>
+          c.type === "add" ||
+          c.type === "remove" ||
+          (c.type === "position" && c.dragging === false)
+      );
+      if (structural) captureSnapshot();
       onNodesChange(filtered);
     },
-    [onNodesChange]
+    [onNodesChange, captureSnapshot]
   );
+
+  // Edge add/remove also goes into the undo history.
+  const handleEdgesChange = React.useCallback(
+    (changes: Parameters<typeof onEdgesChange>[0]) => {
+      const structural = changes.some((c) => c.type === "add" || c.type === "remove");
+      if (structural) captureSnapshot();
+      onEdgesChange(changes);
+    },
+    [onEdgesChange, captureSnapshot]
+  );
+
+  // Global key handler for Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z / Ctrl+A. We skip
+  // when focus is inside a form field so Monaco / inputs keep their own
+  // semantics (Ctrl+A in a textarea selects text, not canvas nodes).
+  React.useEffect(() => {
+    const isEditable = (el: EventTarget | null): boolean => {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      if (el.isContentEditable) return true;
+      // Monaco's textarea is buried inside .monaco-editor — bail for any
+      // descendant of one.
+      return !!el.closest(".monaco-editor");
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (isEditable(e.target)) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      const k = e.key.toLowerCase();
+      if (k === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if ((k === "z" && e.shiftKey) || k === "y") {
+        e.preventDefault();
+        redo();
+      } else if (k === "a") {
+        e.preventDefault();
+        selectAll();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo, selectAll]);
 
   // Re-arrange every node into a clean left-to-right DAG layout via Dagre.
   // Multi-port nodes (if/else, loop) untangle automatically because dagre
@@ -492,7 +580,7 @@ function FlowEditorInner({
             nodes={nodes}
             edges={edges}
             onNodesChange={handleNodesChange}
-            onEdgesChange={onEdgesChange}
+            onEdgesChange={handleEdgesChange}
             onConnect={handleConnect}
             onNodeClick={(_e, n) => setSelectedId(n.id)}
             onPaneClick={() => setSelectedId(null)}
@@ -502,16 +590,16 @@ function FlowEditorInner({
             colorMode={colorMode}
             fitView
             proOptions={{ hideAttribution: true }}
-            // Disable React Flow's global keyboard shortcuts. Default
-            // panActivationKeyCode="Space" and deleteKeyCode=["Backspace",
-            // "Delete"] attach window-level listeners that preventDefault on
-            // those keys — which silently ate spaces (and made backspace
-            // sometimes delete the selected canvas node) when typing in the
-            // Inspector's Monaco editors. Nodes can still be deleted via
-            // the trash icon on a selected edge or the Remove button in
-            // the node config panel.
+            // Space-pan disabled because it conflicted with Monaco typing
+            // in the Inspector. Only Delete deletes (not Backspace) for the
+            // same reason — backspace stays a normal text edit everywhere.
             panActivationKeyCode={null}
-            deleteKeyCode={null}
+            deleteKeyCode={"Delete"}
+            // Left-drag rubber-band selects nodes/edges. Pan is moved to
+            // middle/right click drag, and scroll-wheel zoom still works.
+            selectionOnDrag
+            panOnDrag={[1, 2]}
+            selectionMode={"partial" as never}
           >
             <Background gap={20} size={1} />
             <MiniMap pannable zoomable />
