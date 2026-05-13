@@ -35,6 +35,13 @@ export type NodeConfigProps = {
   /** Fires the "Run this step" subgraph test. */
   onRunStep?: () => void;
   runningStep?: boolean;
+  /**
+   * Pre-built TypeScript .d.ts describing the JS Code sandbox ($input, $prev,
+   * $node) for this node. Only meaningful when nodeType === "code.js". The
+   * flow editor builds this from the last test run so Monaco's autocomplete
+   * surfaces real field names instead of generic identifiers.
+   */
+  jsCodeContextDts?: string;
 };
 
 /**
@@ -449,11 +456,13 @@ function JsCodeForm(props: NodeConfigProps) {
           language="javascript"
           value={get(props, "code", "return $input;") as string}
           onChange={(v) => set(props, "code", v)}
+          extraTypeDeclarations={props.jsCodeContextDts}
         />
       </div>
       <p className="text-[10px] text-muted-foreground">
-        Available: <code>$input</code> (latest output), <code>$prev</code> (Map), <code>fetch</code>, <code>console.log</code>.
-        Must <code>return</code> a value.
+        Available: <code>$input</code> (latest output), <code>$prev</code> (Map), <code>$node</code> (by id),
+        <code>fetch</code>, <code>console.log</code>. Must <code>return</code> a value. After a test run,
+        IntelliSense knows the real shape of <code>$input</code>.
       </p>
       <div className="space-y-1">
         <Label className="text-xs">Timeout (ms)</Label>

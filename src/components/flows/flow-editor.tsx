@@ -47,6 +47,7 @@ import { testRunFlowAction, testRunUpToNodeAction } from "@/server/actions/flow-
 import type { TestNodeResult, TestRunResult } from "@/server/services/flow-test-runner";
 import type { FlowDefinition, FlowNode as DefNode, FlowEdge, TriggerSpec } from "@/lib/flows/types";
 import { buildAvailableRefs } from "./refs-builder";
+import { buildJsCodeContextDts } from "./js-code-context";
 
 type Conn = { id: string; name: string; type: string };
 type Team = { id: string; name: string };
@@ -431,6 +432,17 @@ function FlowEditorInner({
     [currentDefinition, selectedNode, selectedTrigger, lastTestRun]
   );
 
+  // TS declarations for the JS Code node's Monaco editor. Built from the last
+  // test run so autocomplete shows real upstream fields (rows, site, etc.)
+  // instead of just the identifiers Monaco sees in the file.
+  const jsCodeContextDts = React.useMemo(() => {
+    const isJsCode =
+      !!selectedNode &&
+      (selectedNode.data as Record<string, unknown>).type === "code.js";
+    if (!isJsCode) return undefined;
+    return buildJsCodeContextDts(selectedNode!.id, currentDefinition(), lastTestRun);
+  }, [selectedNode, currentDefinition, lastTestRun]);
+
   return (
     <div className="flex flex-col h-full">
       <Header
@@ -579,6 +591,7 @@ function FlowEditorInner({
                   availableRefs={availableRefs}
                   onRunStep={runStep}
                   runningStep={steppingId === selectedNode.id}
+                  jsCodeContextDts={jsCodeContextDts}
                 />
               ) : (
                 <div className="p-4 text-sm text-muted-foreground">Click a node to configure it.</div>
