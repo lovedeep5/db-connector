@@ -595,11 +595,9 @@ function FlowEditorInner({
             // same reason — backspace stays a normal text edit everywhere.
             panActivationKeyCode={null}
             deleteKeyCode={"Delete"}
-            // Left-drag rubber-band selects nodes/edges. Pan is moved to
-            // middle/right click drag, and scroll-wheel zoom still works.
-            selectionOnDrag
-            panOnDrag={[1, 2]}
-            selectionMode={"partial" as never}
+            // Pan = plain left-click drag (default). Rubber-band multi-
+            // select = Shift + drag (React Flow's default `selectionKeyCode`
+            // is "Shift"). This is the Figma/n8n convention people expect.
           >
             <Background gap={20} size={1} />
             <MiniMap pannable zoomable />
