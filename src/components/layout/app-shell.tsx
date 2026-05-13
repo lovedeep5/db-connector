@@ -19,6 +19,8 @@ import {
   ChevronDown,
   ChevronRight,
   Zap,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { signOut } from "next-auth/react";
@@ -96,6 +98,8 @@ function canSee(item: Leaf, perms: Perms): boolean {
   return perms.global.includes(item.requires);
 }
 
+const COLLAPSED_KEY = "dbc-sidebar-collapsed";
+
 export function AppShell({
   user,
   perms,
@@ -106,9 +110,35 @@ export function AppShell({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = React.useState(false);
+  // Sidebar collapse state — persisted across navigations via localStorage
+  // so the choice survives Next's RSC transitions. Defaults to expanded.
+  const [collapsed, setCollapsed] = React.useState<boolean>(false);
+  React.useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(COLLAPSED_KEY);
+      if (saved === "1") setCollapsed(true);
+    } catch {
+      // localStorage can throw in private-mode iframes; just default to expanded.
+    }
+  }, []);
+  const toggleCollapsed = React.useCallback(() => {
+    setCollapsed((v) => {
+      const next = !v;
+      try { window.localStorage.setItem(COLLAPSED_KEY, next ? "1" : "0"); } catch {}
+      return next;
+    });
+  }, []);
   return (
     <div className="flex h-screen bg-background text-foreground">
-      <Sidebar perms={perms} className={cn("hidden md:flex", "transition-all")} />
+      {collapsed ? (
+        <CollapsedRail onExpand={toggleCollapsed} className="hidden md:flex" />
+      ) : (
+        <Sidebar
+          perms={perms}
+          onCollapse={toggleCollapsed}
+          className={cn("hidden md:flex", "transition-all")}
+        />
+      )}
       <MobileSidebar perms={perms} open={open} onOpenChange={setOpen} />
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar user={user} onOpenMobile={() => setOpen(true)} />
@@ -118,12 +148,52 @@ export function AppShell({
   );
 }
 
-function Sidebar({ perms, className }: { perms: Perms; className?: string }) {
+/**
+ * Tiny vertical rail shown when the sidebar is collapsed. Mirrors the
+ * palette/inspector "closed" state in the flow editor — one button to
+ * expand, nothing else. Maximises canvas space.
+ */
+function CollapsedRail({ onExpand, className }: { onExpand: () => void; className?: string }) {
+  return (
+    <aside className={cn("w-8 border-r bg-card/40 flex flex-col items-center pt-2 gap-2", className)}>
+      <button
+        type="button"
+        onClick={onExpand}
+        className="h-7 w-7 rounded hover:bg-accent flex items-center justify-center"
+        aria-label="Expand sidebar"
+        title="Expand sidebar"
+      >
+        <PanelLeftOpen className="h-3.5 w-3.5" />
+      </button>
+    </aside>
+  );
+}
+
+function Sidebar({
+  perms,
+  onCollapse,
+  className,
+}: {
+  perms: Perms;
+  onCollapse?: () => void;
+  className?: string;
+}) {
   return (
     <aside className={cn("w-64 border-r bg-card flex flex-col", className)}>
       <div className="h-14 flex items-center gap-2 px-4 border-b">
         <Database className="h-5 w-5 text-primary" />
-        <span className="font-semibold">DBConnector</span>
+        <span className="font-semibold flex-1">DBConnector</span>
+        {onCollapse && (
+          <button
+            type="button"
+            onClick={onCollapse}
+            className="h-7 w-7 rounded hover:bg-accent flex items-center justify-center text-muted-foreground hover:text-foreground"
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
+          >
+            <PanelLeftClose className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
       <nav className="flex-1 p-3 space-y-0.5 overflow-y-auto">
         {NAV.map((entry) => (entry.kind === "leaf" ? (
