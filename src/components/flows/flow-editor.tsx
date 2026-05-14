@@ -458,27 +458,52 @@ function FlowEditorInner({
     }
   };
 
-  // Step-level test run (current selected node + its ancestors).
+  // Step-level test run. Two modes share one button:
+  //   - Action node  → "Run this step"  : run target + its ancestors only.
+  //   - Trigger node → "Test this trigger" : fire the run as if THIS trigger
+  //     activated. S3 triggers poll the bucket for real so the user gets
+  //     to see whether their credentials / prefix actually find anything.
   const [steppingId, setSteppingId] = React.useState<string | null>(null);
   const runStep = async () => {
-    if (!selectedNode || selectedTrigger) return;
+    if (!selectedNode) return;
     setSteppingId(selectedNode.id);
+    setRunningNodeId(null);
+    setLastTestRun(null);
     try {
-      const result = await testRunUpToNodeAction({
-        definition: currentDefinition(),
-        targetNodeId: selectedNode.id,
-        defaultNodeTimeoutMs: meta.defaultNodeTimeoutMs,
+      const body = selectedTrigger
+        ? {
+            definition: currentDefinition(),
+            defaultNodeTimeoutMs: meta.defaultNodeTimeoutMs,
+            entryTriggerId: selectedNode.id,
+          }
+        : {
+            definition: currentDefinition(),
+            defaultNodeTimeoutMs: meta.defaultNodeTimeoutMs,
+            targetNodeId: selectedNode.id,
+          };
+      await runTestStream(body, {
+        onStart: (id) => setRunningNodeId(id),
+        onEnd: () => setRunningNodeId(null),
+        onDone: (result) => {
+          setLastTestRun(result);
+          if (result.status === "success") {
+            toast.success(
+              selectedTrigger
+                ? `Trigger fired OK · ${result.durationMs}ms`
+                : `Step "${selectedNode.id}" ran OK · ${result.durationMs}ms`
+            );
+          } else {
+            toast.error(`Failed: ${result.errorMessage ?? "unknown error"}`);
+            const failed = result.nodes.find((n) => n.status === "error");
+            if (failed) setSelectedId(failed.nodeId);
+          }
+        },
       });
-      setLastTestRun(result);
-      if (result.status === "success") {
-        toast.success(`Step "${selectedNode.id}" ran OK · ${result.durationMs}ms`);
-      } else {
-        toast.error(`Step failed: ${result.errorMessage ?? "unknown error"}`);
-      }
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
       setSteppingId(null);
+      setRunningNodeId(null);
     }
   };
 
@@ -633,7 +658,7 @@ function FlowEditorInner({
                   onDelete={onDeleteSelected}
                   connections={connections}
                   availableRefs={availableRefs}
-                  onRunStep={selectedTrigger ? undefined : runStep}
+                  onRunStep={runStep}
                   runningStep={steppingId === selectedNode.id}
                   jsCodeContextDts={jsCodeContextDts}
                   flowId={flowId}
@@ -873,7 +898,13 @@ function defaultNodes(def?: FlowDefinition): Node[] {
  * caller. Each chunk is one JSON line.
  */
 async function runTestStream(
-  body: { definition: FlowDefinition; defaultNodeTimeoutMs?: number; targetNodeId?: string },
+  body: {
+    definition: FlowDefinition;
+    defaultNodeTimeoutMs?: number;
+    targetNodeId?: string;
+    /** Fire as if this trigger node activated. Mutually exclusive with targetNodeId. */
+    entryTriggerId?: string;
+  },
   handlers: {
     onStart: (nodeId: string) => void;
     onEnd: (nodeId: string) => void;

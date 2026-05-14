@@ -60,10 +60,14 @@ export function NodeConfig(props: NodeConfigProps) {
       <div className="flex items-center justify-between gap-2">
         <h3 className="font-medium">Configure</h3>
         <div className="flex items-center gap-1">
-          {props.onRunStep && !props.triggerKind && (
+          {props.onRunStep && (
             <Button variant="outline" size="sm" onClick={props.onRunStep} disabled={props.runningStep}>
               {props.runningStep ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-              Run this step
+              {props.triggerKind === "s3.objectCreated"
+                ? "Pull from S3"
+                : props.triggerKind
+                ? "Test this trigger"
+                : "Run this step"}
             </Button>
           )}
           {props.onDelete && !props.triggerKind && (

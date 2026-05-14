@@ -277,6 +277,66 @@ async function saveState(
     .where(eq(schema.flows.id, flowId));
 }
 
+/**
+ * Single-shot S3 poll used by the test-stream route's "Test this trigger"
+ * path. Lists objects matching the trigger's prefix/suffix, picks the
+ * MOST RECENT one (so a quick test surfaces fresh data), and returns a
+ * fully-formed TriggerPayload — including a presigned GET url so any
+ * downstream Download File node "just works".
+ *
+ * Returns null when:
+ *   - the credential id doesn't resolve to an active S3 connection,
+ *   - the bucket / prefix has no objects.
+ * The caller decides whether to surface that as an error or a no-op.
+ */
+export async function probeS3OnceForTest(args: {
+  connectionId: string;
+  bucket: string;
+  prefix?: string;
+  suffix?: string;
+}): Promise<
+  | {
+      kind: "s3";
+      bucket: string;
+      key: string;
+      size: number;
+      lastModified: string;
+      etag: string;
+      presignedUrl: string;
+    }
+  | null
+> {
+  const [conn] = await db
+    .select()
+    .from(schema.connections)
+    .where(eq(schema.connections.id, args.connectionId));
+  if (!conn || conn.type !== "s3") return null;
+  const creds = decryptJSON<S3Config>(conn.encryptedConfig);
+  const client = makeClient(creds);
+  // No watermark on test mode — we just want the newest matching object,
+  // regardless of whether the real poller has fired for it before.
+  const objects = await listNew(client, args.bucket, args.prefix, args.suffix, null);
+  if (objects.length === 0) return null;
+  // listNew returns oldest-first; for a test the latest object is more
+  // useful since it likely matches what the user just uploaded.
+  const newest = objects[objects.length - 1];
+  if (!newest.Key || !newest.LastModified) return null;
+  const presignedUrl = await getSignedUrl(
+    client,
+    new GetObjectCommand({ Bucket: args.bucket, Key: newest.Key }),
+    { expiresIn: 15 * 60 }
+  );
+  return {
+    kind: "s3",
+    bucket: args.bucket,
+    key: newest.Key,
+    size: newest.Size ?? 0,
+    lastModified: newest.LastModified.toISOString(),
+    etag: (newest.ETag ?? "").replace(/"/g, ""),
+    presignedUrl,
+  };
+}
+
 function safeParse(raw: string): AllTriggerState {
   try {
     const v = JSON.parse(raw);
