@@ -422,6 +422,8 @@ export function ConnectionForm({
                   Leave blank for real AWS S3. Set this for MinIO, Cloudflare R2, DigitalOcean Spaces, or any other S3-compatible storage.
                 </p>
               </div>
+
+              <S3SetupHelp defaultBucket={watch("defaultBucket") || ""} />
             </>
           )}
 
@@ -449,6 +451,102 @@ export function ConnectionForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+/**
+ * Inline help under the S3 fields. Shows the exact 5-click AWS Console
+ * walkthrough plus a tight-policy JSON snippet the user's AWS admin can
+ * paste straight in. Default-collapsed (HTML `<details>`) so it doesn't
+ * clutter the form for users who already know what they're doing.
+ *
+ * The JSON snippet substitutes the user's `defaultBucket` (when filled)
+ * into the Resource ARNs so they can copy-paste without editing.
+ */
+function S3SetupHelp({ defaultBucket }: { defaultBucket: string }) {
+  const bucket = defaultBucket.trim() || "YOUR-BUCKET-NAME";
+  const policy = JSON.stringify(
+    {
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Action: ["s3:ListBucket"],
+          Resource: [`arn:aws:s3:::${bucket}`],
+        },
+        {
+          Effect: "Allow",
+          Action: ["s3:GetObject", "s3:PutObject"],
+          Resource: [`arn:aws:s3:::${bucket}/*`],
+        },
+      ],
+    },
+    null,
+    2
+  );
+  const copy = (text: string) => {
+    if (typeof navigator !== "undefined") navigator.clipboard?.writeText(text);
+  };
+  return (
+    <details className="mt-2 rounded-md border bg-muted/30 group">
+      <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+        How do I get these from AWS? (5-click setup)
+      </summary>
+      <div className="px-3 pb-3 pt-1 space-y-3 text-xs">
+        <ol className="list-decimal ml-4 space-y-1.5 text-muted-foreground">
+          <li>
+            In the AWS Console go to <strong className="text-foreground">IAM → Users → Create user</strong>.
+            Name it something like <code className="text-foreground">dbconnector-s3</code>.
+          </li>
+          <li>
+            On the permissions step pick <strong className="text-foreground">Attach policies directly</strong> →
+            <strong className="text-foreground"> Create policy</strong>, paste the JSON below, and save it as
+            <code className="text-foreground"> dbconnector-s3-access</code>. Attach that policy to the user.
+          </li>
+          <li>
+            Click into the user → <strong className="text-foreground">Security credentials</strong> tab →
+            <strong className="text-foreground"> Create access key</strong> →
+            <strong className="text-foreground"> Application running outside AWS</strong>.
+          </li>
+          <li>
+            Copy the <strong className="text-foreground">Access key ID</strong> and
+            <strong className="text-foreground"> Secret access key</strong>. The secret is shown only once.
+          </li>
+          <li>Paste both into the fields above. Save. Done — keys never expire.</li>
+        </ol>
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-medium text-foreground">Permissions policy (paste in step 2)</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-6 text-[10px] gap-1 px-2"
+              onClick={() => copy(policy)}
+              title="Copy policy JSON"
+            >
+              Copy
+            </Button>
+          </div>
+          <pre className="rounded border bg-background p-2 overflow-x-auto text-[10px] font-mono leading-snug">
+{policy}
+          </pre>
+          <p className="text-[10px] text-muted-foreground">
+            {defaultBucket ? (
+              <>Locked to <code>{defaultBucket}</code>. Add more buckets later by editing the policy in IAM.</>
+            ) : (
+              <>Replace <code>YOUR-BUCKET-NAME</code> with your bucket. Set the &quot;Default bucket&quot; field above to auto-fill it here.</>
+            )}
+          </p>
+        </div>
+        <p className="text-muted-foreground">
+          Covers everything DBConnector needs today and tomorrow:&nbsp;
+          <strong className="text-foreground">ListBucket</strong> for the trigger to poll for new files,
+          <strong className="text-foreground"> GetObject</strong> to fetch them (and generate presigned download
+          URLs), and <strong className="text-foreground">PutObject</strong> for upcoming S3 write actions.
+        </p>
+      </div>
+    </details>
   );
 }
 
