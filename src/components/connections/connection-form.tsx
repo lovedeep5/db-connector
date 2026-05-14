@@ -456,16 +456,49 @@ export function ConnectionForm({
 
 /**
  * Inline help under the S3 fields. Shows the exact 5-click AWS Console
- * walkthrough plus a tight-policy JSON snippet the user's AWS admin can
- * paste straight in. Default-collapsed (HTML `<details>`) so it doesn't
- * clutter the form for users who already know what they're doing.
- *
- * The JSON snippet substitutes the user's `defaultBucket` (when filled)
- * into the Resource ARNs so they can copy-paste without editing.
+ * walkthrough plus a copyable IAM policy. Default policy grants
+ * read/write/list on ALL buckets in the account — least friction, works
+ * out of the box. Optional "Tighten the scope" tips below show how to
+ * narrow it (specific bucket, prefix-only, read-only) without losing
+ * the simple-default experience.
  */
 function S3SetupHelp({ defaultBucket }: { defaultBucket: string }) {
-  const bucket = defaultBucket.trim() || "YOUR-BUCKET-NAME";
-  const policy = JSON.stringify(
+  const allBucketsPolicy = JSON.stringify(
+    {
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Action: ["s3:ListBucket", "s3:ListAllMyBuckets"],
+          Resource: ["arn:aws:s3:::*"],
+        },
+        {
+          Effect: "Allow",
+          Action: ["s3:GetObject", "s3:PutObject"],
+          Resource: ["arn:aws:s3:::*/*"],
+        },
+      ],
+    },
+    null,
+    2
+  );
+
+  // Hint snippets — small examples the user can copy if they want to
+  // narrow the default policy. Pre-substituted with their default bucket
+  // when set, otherwise placeholders.
+  const bucket = (defaultBucket.trim() || "your-bucket").toLowerCase();
+  const oneBucket = JSON.stringify(
+    {
+      Version: "2012-10-17",
+      Statement: [
+        { Effect: "Allow", Action: ["s3:ListBucket"], Resource: [`arn:aws:s3:::${bucket}`] },
+        { Effect: "Allow", Action: ["s3:GetObject", "s3:PutObject"], Resource: [`arn:aws:s3:::${bucket}/*`] },
+      ],
+    },
+    null,
+    2
+  );
+  const onePrefix = JSON.stringify(
     {
       Version: "2012-10-17",
       Statement: [
@@ -473,20 +506,34 @@ function S3SetupHelp({ defaultBucket }: { defaultBucket: string }) {
           Effect: "Allow",
           Action: ["s3:ListBucket"],
           Resource: [`arn:aws:s3:::${bucket}`],
+          Condition: { StringLike: { "s3:prefix": ["uploads/*"] } },
         },
         {
           Effect: "Allow",
           Action: ["s3:GetObject", "s3:PutObject"],
-          Resource: [`arn:aws:s3:::${bucket}/*`],
+          Resource: [`arn:aws:s3:::${bucket}/uploads/*`],
         },
       ],
     },
     null,
     2
   );
+  const readOnly = JSON.stringify(
+    {
+      Version: "2012-10-17",
+      Statement: [
+        { Effect: "Allow", Action: ["s3:ListBucket", "s3:ListAllMyBuckets"], Resource: ["arn:aws:s3:::*"] },
+        { Effect: "Allow", Action: ["s3:GetObject"], Resource: ["arn:aws:s3:::*/*"] },
+      ],
+    },
+    null,
+    2
+  );
+
   const copy = (text: string) => {
     if (typeof navigator !== "undefined") navigator.clipboard?.writeText(text);
   };
+
   return (
     <details className="mt-2 rounded-md border bg-muted/30 group">
       <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
@@ -514,39 +561,97 @@ function S3SetupHelp({ defaultBucket }: { defaultBucket: string }) {
           </li>
           <li>Paste both into the fields above. Save. Done — keys never expire.</li>
         </ol>
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-medium text-foreground">Permissions policy (paste in step 2)</span>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-6 text-[10px] gap-1 px-2"
-              onClick={() => copy(policy)}
-              title="Copy policy JSON"
-            >
-              Copy
-            </Button>
+
+        <PolicyBlock
+          title="Default policy — read / write / list on every bucket"
+          subtitle="Simplest. Works for any flow you build later without coming back here. Paste in step 2."
+          json={allBucketsPolicy}
+          onCopy={() => copy(allBucketsPolicy)}
+        />
+
+        <details className="rounded border bg-background/60">
+          <summary className="cursor-pointer select-none px-2 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground">
+            Want to tighten the scope? (optional)
+          </summary>
+          <div className="px-2 pb-2 pt-1 space-y-3">
+            <p className="text-[10px] text-muted-foreground">
+              The default above is the lowest-friction option. Pick one of these if your security team requires
+              a narrower grant. None of them change DBConnector&apos;s behaviour — they just shrink the AWS
+              blast radius if the keys ever leak.
+            </p>
+
+            <PolicyBlock
+              title={`Restrict to one bucket: ${bucket}`}
+              subtitle="Only this bucket — both directions."
+              json={oneBucket}
+              onCopy={() => copy(oneBucket)}
+              compact
+            />
+
+            <PolicyBlock
+              title={`Restrict to one prefix: ${bucket}/uploads/*`}
+              subtitle="Useful when the bucket is shared with other tools."
+              json={onePrefix}
+              onCopy={() => copy(onePrefix)}
+              compact
+            />
+
+            <PolicyBlock
+              title="Read-only on every bucket"
+              subtitle="Drops s3:PutObject. Trigger + download still work; S3 write actions won't."
+              json={readOnly}
+              onCopy={() => copy(readOnly)}
+              compact
+            />
           </div>
-          <pre className="rounded border bg-background p-2 overflow-x-auto text-[10px] font-mono leading-snug">
-{policy}
-          </pre>
-          <p className="text-[10px] text-muted-foreground">
-            {defaultBucket ? (
-              <>Locked to <code>{defaultBucket}</code>. Add more buckets later by editing the policy in IAM.</>
-            ) : (
-              <>Replace <code>YOUR-BUCKET-NAME</code> with your bucket. Set the &quot;Default bucket&quot; field above to auto-fill it here.</>
-            )}
-          </p>
-        </div>
+        </details>
+
         <p className="text-muted-foreground">
-          Covers everything DBConnector needs today and tomorrow:&nbsp;
-          <strong className="text-foreground">ListBucket</strong> for the trigger to poll for new files,
-          <strong className="text-foreground"> GetObject</strong> to fetch them (and generate presigned download
-          URLs), and <strong className="text-foreground">PutObject</strong> for upcoming S3 write actions.
+          Action coverage:&nbsp;
+          <strong className="text-foreground">ListBucket</strong> for trigger polling,
+          <strong className="text-foreground"> GetObject</strong> for trigger payload + downloads,
+          <strong className="text-foreground"> PutObject</strong> for upcoming S3 write actions.
         </p>
       </div>
     </details>
+  );
+}
+
+function PolicyBlock({
+  title,
+  subtitle,
+  json,
+  onCopy,
+  compact,
+}: {
+  title: string;
+  subtitle?: string;
+  json: string;
+  onCopy: () => void;
+  compact?: boolean;
+}) {
+  return (
+    <div className={compact ? "space-y-1" : "space-y-1.5"}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="font-medium text-foreground truncate">{title}</div>
+          {subtitle && <div className="text-[10px] text-muted-foreground">{subtitle}</div>}
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-6 text-[10px] gap-1 px-2 shrink-0"
+          onClick={onCopy}
+          title="Copy policy JSON"
+        >
+          Copy
+        </Button>
+      </div>
+      <pre className="rounded border bg-background p-2 overflow-x-auto text-[10px] font-mono leading-snug">
+{json}
+      </pre>
+    </div>
   );
 }
 
