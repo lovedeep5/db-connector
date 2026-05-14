@@ -24,7 +24,7 @@ import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
   Loader2, Save, ArrowLeft, Play, AlertCircle, CheckCircle2,
-  PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
+  PanelLeftClose, PanelLeftOpen,
   Wand2, Maximize2, Settings as SettingsIcon,
 } from "lucide-react";
 
@@ -35,7 +35,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CanvasNode } from "./canvas-node";
 import { DeletableEdge } from "./deletable-edge";
 import { NodePalette, NODE_DRAG_TYPE } from "./node-palette";
@@ -44,7 +43,7 @@ import { findCatalog } from "./node-catalog";
 import { applyDagreLayout } from "./auto-layout";
 import { createFlow, updateFlow } from "@/server/actions/flows";
 import { testRunFlowAction, testRunUpToNodeAction } from "@/server/actions/flow-test";
-import type { TestNodeResult, TestRunResult } from "@/server/services/flow-test-runner";
+import type { TestRunResult } from "@/server/services/flow-test-runner";
 import type { FlowDefinition, FlowNode as DefNode, FlowEdge } from "@/lib/flows/types";
 import { isTriggerType, TRIGGER_NODE_TYPES } from "@/lib/flows/types";
 import { normalizeFlowDefinition } from "@/lib/flows/definition";
@@ -188,7 +187,6 @@ function FlowEditorInner({
   }, [setNodes, setEdges]);
   const [lastTestRun, setLastTestRun] = React.useState<TestRunResult | null>(null);
   const [paletteOpen, setPaletteOpen] = React.useState(true);
-  const [inspectorOpen, setInspectorOpen] = React.useState(true);
   // Lifted up here so the `lastTestRun`/`runningNodeId` sync effect below
   // sees it. Set by the streaming test runner.
   const [runningNodeId, setRunningNodeId] = React.useState<string | null>(null);
@@ -625,74 +623,9 @@ function FlowEditorInner({
           </ReactFlow>
         </div>
 
-        {!inspectorOpen && (
-          <button
-            type="button"
-            onClick={() => setInspectorOpen(true)}
-            className="w-7 border-l bg-card/40 flex flex-col items-center pt-2 gap-2 hover:bg-accent"
-            title="Show inspector"
-          >
-            <PanelRightOpen className="h-3.5 w-3.5" />
-            <span className="text-[9px] text-muted-foreground [writing-mode:vertical-rl] rotate-180">Inspector</span>
-          </button>
-        )}
-        {inspectorOpen && (
-        <aside className="w-80 border-l flex flex-col bg-card/40">
-          <Tabs defaultValue="config" className="h-full flex flex-col">
-            <div className="flex items-center justify-between px-2 pt-2">
-              <TabsList>
-                <TabsTrigger value="config">Inspector</TabsTrigger>
-                <TabsTrigger value="output">Output</TabsTrigger>
-              </TabsList>
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-6 w-6"
-                onClick={() => setInspectorOpen(false)}
-                title="Collapse"
-              >
-                <PanelRightClose className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-            <TabsContent value="config" className="flex-1 overflow-y-auto m-0">
-              {selectedNode ? (
-                <NodeConfig
-                  nodeId={selectedNode.id}
-                  nodeType={(selectedNode.data as Record<string, unknown>).type as string}
-                  // Triggers and action nodes both use NodeConfig; `triggerKind`
-                  // when set tells the form to render the trigger config UI.
-                  triggerKind={
-                    selectedTrigger
-                      ? (((selectedNode.data as Record<string, unknown>).type as string) as never)
-                      : undefined
-                  }
-                  config={((selectedNode.data as Record<string, unknown>).config as Record<string, unknown>) ?? {}}
-                  onChange={onConfigChange}
-                  onDelete={onDeleteSelected}
-                  connections={connections}
-                  availableRefs={availableRefs}
-                  onRunStep={runStep}
-                  runningStep={steppingId === selectedNode.id}
-                  jsCodeContextDts={jsCodeContextDts}
-                  flowId={flowId}
-                />
-              ) : (
-                <div className="p-4 text-sm text-muted-foreground">
-                  Drag a node from the palette to start. Begin with a trigger (Schedule, Manual,
-                  Webhook, S3) so the flow knows when to run.
-                </div>
-              )}
-            </TabsContent>
-            <TabsContent value="output" className="m-0 p-4 flex-1 overflow-y-auto">
-              <OutputPanel
-                selectedNodeId={selectedNode?.id ?? null}
-                result={lastTestRun}
-                onSelectNode={setSelectedId}
-              />
-            </TabsContent>
-          </Tabs>
-        </aside>
-        )}
+        {/* Right sidebar removed — the double-click NodeModal is the
+            primary editor now. Single-click still selects (canvas
+            highlight) so users can see which node they're focused on. */}
       </div>
 
       {/* Rich per-node editor: opens on double-click. Shares all the same
@@ -803,89 +736,6 @@ function Header({
       </Button>
     </div>
   );
-}
-
-function OutputPanel({
-  selectedNodeId,
-  result,
-  onSelectNode,
-}: {
-  selectedNodeId: string | null;
-  result: TestRunResult | null;
-  onSelectNode?: (id: string) => void;
-}) {
-  if (!result) {
-    return <p className="text-sm text-muted-foreground">Run the flow with <strong>Test run</strong> to see per-node output here.</p>;
-  }
-  if (!selectedNodeId) {
-    return (
-      <div className="space-y-2 text-sm">
-        <p className="text-muted-foreground">Click any row below (or a node on the canvas) to see its result.</p>
-        <ul className="space-y-1 mt-3">
-          {result.nodes.map((n) => (
-            <li key={n.nodeId}>
-              <button
-                type="button"
-                onClick={() => onSelectNode?.(n.nodeId)}
-                className="w-full flex items-center gap-2 text-xs rounded px-2 py-1 hover:bg-accent transition-colors text-left"
-                disabled={!onSelectNode}
-              >
-                <StatusDot status={n.status} />
-                <span className="font-mono truncate">{n.nodeId}</span>
-                <span className="text-muted-foreground truncate">{n.nodeType}</span>
-                <span className="text-muted-foreground ml-auto shrink-0">{n.durationMs}ms</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-    );
-  }
-  const nodeResult = result.nodes.find((n) => n.nodeId === selectedNodeId);
-  if (!nodeResult) {
-    return <p className="text-xs text-muted-foreground">This node hasn&apos;t run yet (the flow stopped before reaching it).</p>;
-  }
-  return <NodeRunDetail r={nodeResult} />;
-}
-
-function NodeRunDetail({ r }: { r: TestNodeResult }) {
-  return (
-    <div className="space-y-3 text-xs">
-      <div className="flex items-center gap-2">
-        <StatusDot status={r.status} />
-        <span className="font-mono">{r.nodeId}</span>
-        <Badge variant="outline" className="text-[10px]">{r.nodeType}</Badge>
-        <span className="text-muted-foreground ml-auto">{r.durationMs}ms</span>
-      </div>
-      {r.errorMessage && (
-        <pre className="bg-destructive/10 text-destructive p-2 rounded whitespace-pre-wrap max-h-48 overflow-auto">{r.errorMessage}</pre>
-      )}
-      {r.logs && r.logs.length > 0 && (
-        <details open>
-          <summary className="cursor-pointer text-muted-foreground">logs ({r.logs.length})</summary>
-          <pre className="mt-1 p-2 bg-muted rounded overflow-auto whitespace-pre-wrap max-h-64">{r.logs.join("\n")}</pre>
-        </details>
-      )}
-      {r.input !== undefined && (
-        <details>
-          <summary className="cursor-pointer text-muted-foreground">input</summary>
-          <pre className="mt-1 p-2 bg-muted rounded overflow-auto whitespace-pre max-h-80">{JSON.stringify(r.input, null, 2)}</pre>
-        </details>
-      )}
-      {r.output !== undefined && (
-        <details open>
-          <summary className="cursor-pointer text-muted-foreground">output</summary>
-          <pre className="mt-1 p-2 bg-muted rounded overflow-auto whitespace-pre max-h-96">{JSON.stringify(r.output, null, 2)}</pre>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function StatusDot({ status }: { status: "success" | "error" | "skipped" }) {
-  if (status === "success") return <span className="h-2 w-2 rounded-full bg-emerald-500" />;
-  if (status === "error") return <span className="h-2 w-2 rounded-full bg-destructive" />;
-  return <span className="h-2 w-2 rounded-full bg-muted-foreground/40" />;
 }
 
 function SettingsForm({

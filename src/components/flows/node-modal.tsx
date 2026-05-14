@@ -274,7 +274,7 @@ function UpstreamCard({
             No data — run the upstream node or click <strong>Test run</strong> in the topbar.
           </p>
         ) : (
-          <pre className="text-[10px] font-mono leading-snug overflow-auto max-h-64 whitespace-pre">
+          <pre className="text-[10px] font-mono leading-snug whitespace-pre">
 {JSON.stringify(output, null, 2)}
           </pre>
         )}
@@ -289,12 +289,16 @@ function UpstreamCard({
 type NodeRunResult = NonNullable<TestRunResult["nodes"]>[number];
 
 function OutputView({ result }: { result: NodeRunResult }) {
+  // Single scroll: the SidePanel wrapping us already does `overflow-auto`
+  // on its content area, so each pre block uses `whitespace-pre` (or
+  // `whitespace-pre-wrap` for text) WITHOUT its own max-h / overflow.
+  // That stops the "two scrollbars" stacking the user reported.
   return (
     <div className="space-y-3 text-xs">
       {result.errorMessage && (
         <div>
           <div className="text-[10px] font-medium uppercase tracking-wide text-destructive mb-1">Error</div>
-          <pre className="bg-destructive/10 text-destructive p-2 rounded whitespace-pre-wrap max-h-48 overflow-auto">
+          <pre className="bg-destructive/10 text-destructive p-2 rounded whitespace-pre-wrap">
 {result.errorMessage}
           </pre>
         </div>
@@ -304,7 +308,7 @@ function OutputView({ result }: { result: NodeRunResult }) {
           <summary className="cursor-pointer text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
             Logs ({result.logs.length})
           </summary>
-          <pre className="mt-1 p-2 bg-background rounded border whitespace-pre-wrap max-h-48 overflow-auto">
+          <pre className="mt-1 p-2 bg-background rounded border whitespace-pre-wrap">
 {result.logs.join("\n")}
           </pre>
         </details>
@@ -312,7 +316,7 @@ function OutputView({ result }: { result: NodeRunResult }) {
       {result.output !== undefined && (
         <div>
           <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground mb-1">Output</div>
-          <pre className="p-2 bg-background rounded border whitespace-pre max-h-[60vh] overflow-auto font-mono">
+          <pre className="p-2 bg-background rounded border whitespace-pre font-mono">
 {JSON.stringify(result.output, null, 2)}
           </pre>
         </div>
@@ -320,7 +324,7 @@ function OutputView({ result }: { result: NodeRunResult }) {
       {result.input !== undefined && (
         <details>
           <summary className="cursor-pointer text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Resolved input</summary>
-          <pre className="mt-1 p-2 bg-background rounded border whitespace-pre max-h-48 overflow-auto font-mono">
+          <pre className="mt-1 p-2 bg-background rounded border whitespace-pre font-mono">
 {JSON.stringify(result.input, null, 2)}
           </pre>
         </details>
