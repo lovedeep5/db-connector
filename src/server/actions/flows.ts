@@ -268,11 +268,12 @@ export async function createSampleFlow(): Promise<string> {
         config: {
           to: user.email ?? "you@example.com",
           subject: "Sample report from DBConnector",
-          html:
-            `<p>Hi ${user.name ?? "there"},</p>` +
-            `<p>This is the sample workflow. The DB Query produced ` +
-            `<strong>{{ $node.${QUERY_ID}.rowCount }}</strong> rows.</p>` +
-            `<p>The CSV is attached. ✨</p>`,
+          format: "text",
+          body:
+            `Hi ${user.name ?? "there"},\n\n` +
+            `This is the sample workflow. The DB Query produced ` +
+            `{{ $node.${QUERY_ID}.rowCount }} rows.\n\n` +
+            `The CSV is attached.`,
           attachment: `{{ $node.${FILE_ID} }}`,
         },
       },

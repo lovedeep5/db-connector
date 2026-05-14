@@ -2,15 +2,23 @@ import { z } from "zod";
 import type { FileOutput, NodeDef } from "../types";
 import { isValidEmail, parseRecipients, sendEmail } from "@/lib/email";
 
-const Config = z.object({
+/**
+ * Body shape — v2:
+ *   - `format`: "text" (default) sends as plain text, preserving newlines
+ *     exactly as the user typed; "html" sends as HTML.
+ *   - `body`: the actual content. Templates resolve in either mode.
+ *
+ * Legacy compat: older flows had a top-level `html` field instead. The
+ * preprocess at the bottom of `Config` lifts `html` into `{ format:"html",
+ * body: html }` so saved flows keep working without manual migration.
+ */
+const ConfigShape = z.object({
   /** Optional SMTP connection id. Omit to fall back to workspace SMTP from Settings → Email. */
   smtpConnectionId: z.string().optional(),
   to: z.string().min(1, "At least one recipient"),
   subject: z.string().min(1, "Subject required"),
-  /** HTML body. Templates are resolved before this node runs. */
-  html: z.string().min(1),
-  /** Plain-text fallback. Optional. */
-  text: z.string().optional(),
+  format: z.enum(["text", "html"]).default("text"),
+  body: z.string().min(1, "Body required"),
   /** Optional FileOutput from an upstream node, e.g. transform.toFile. */
   attachment: z
     .object({
@@ -30,6 +38,16 @@ const Config = z.object({
   }
 });
 
+const Config = z.preprocess((raw) => {
+  if (!raw || typeof raw !== "object") return raw;
+  const obj = raw as Record<string, unknown>;
+  // Legacy: { html: "..." } → { format: "html", body: "..." }
+  if (typeof obj.body !== "string" && typeof obj.html === "string") {
+    return { ...obj, format: obj.format ?? "html", body: obj.html };
+  }
+  return obj;
+}, ConfigShape);
+
 type EmailOutput = { messageId: string; recipients: string[] };
 
 export const sendEmailNode: NodeDef<z.infer<typeof Config>, EmailOutput> = {
@@ -43,7 +61,8 @@ export const sendEmailNode: NodeDef<z.infer<typeof Config>, EmailOutput> = {
   defaultConfig: () => ({
     to: "",
     subject: "Report from DBConnector",
-    html: "<p>Hi,</p><p>See attached.</p>",
+    format: "text" as const,
+    body: "Hi,\n\nSee attached.",
   }),
   takesInput: true,
   async execute(_ctx, cfg) {
@@ -57,11 +76,15 @@ export const sendEmailNode: NodeDef<z.infer<typeof Config>, EmailOutput> = {
           },
         ]
       : undefined;
+    // In plain-text mode we send ONLY `text:` — no html field — so the
+    // recipient's client renders it with the newlines and whitespace the
+    // user typed. HTML mode passes the body through as-is.
+    const isHtml = cfg.format === "html";
     const { messageId } = await sendEmail({
       to: recipients,
       subject: cfg.subject,
-      html: cfg.html,
-      text: cfg.text,
+      html: isHtml ? cfg.body : undefined,
+      text: isHtml ? undefined : cfg.body,
       attachments,
       smtpConnectionId: cfg.smtpConnectionId || undefined,
     });

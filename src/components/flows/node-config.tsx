@@ -451,15 +451,76 @@ function SendEmailForm(props: NodeConfigProps) {
         onChange={(v) => set(props, "subject", v)}
         refs={props.availableRefs}
       />
+      <EmailBodyField {...props} />
+      <AttachmentField {...props} />
+    </div>
+  );
+}
+
+/**
+ * Body field for Send Email. Defaults to plain text — newlines are
+ * preserved exactly. A small Format dropdown lets advanced users switch
+ * to HTML when they want a styled email.
+ *
+ * Legacy compatibility: flows saved before this split stored the body in
+ * `html` and had no `format` field. We treat that as "HTML mode" and read
+ * from `html` instead of `body`, then write back to `body` + `format`
+ * once the user edits anything. So opening + saving an old flow gently
+ * migrates it without breaking siblings using the same node.
+ */
+function EmailBodyField(props: NodeConfigProps) {
+  const legacyHtml = props.config.html;
+  const hasLegacyHtml = typeof legacyHtml === "string" && legacyHtml.length > 0;
+  const explicitFormat = props.config.format as "text" | "html" | undefined;
+  // Auto-pick HTML when there's a legacy `html` payload and no explicit
+  // format yet. Otherwise default to text for new flows.
+  const format: "text" | "html" =
+    explicitFormat ?? (hasLegacyHtml ? "html" : "text");
+  const body =
+    (props.config.body as string | undefined) ??
+    (hasLegacyHtml ? (legacyHtml as string) : "");
+
+  const setFormat = (next: "text" | "html") => {
+    // When switching, persist both fields cleanly and clear the legacy key.
+    const cleaned = { ...props.config };
+    delete (cleaned as Record<string, unknown>).html;
+    props.onChange({ ...cleaned, format: next, body });
+  };
+  const setBody = (v: string) => {
+    const cleaned = { ...props.config };
+    delete (cleaned as Record<string, unknown>).html;
+    props.onChange({ ...cleaned, format, body: v });
+  };
+
+  const placeholder =
+    format === "html"
+      ? "<p>Report attached.</p>\n<p>Row count: {{ $node.q1.rowCount }}</p>"
+      : "Hi,\n\nThe report is attached. {{ $node.q1.rowCount }} rows today.\n\n— Team";
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Label className="text-xs">Format</Label>
+        <Select value={format} onValueChange={(v) => setFormat(v as "text" | "html")}>
+          <SelectTrigger className="h-7 w-32"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="text">Plain text</SelectItem>
+            <SelectItem value="html">HTML</SelectItem>
+          </SelectContent>
+        </Select>
+        <span className="text-[10px] text-muted-foreground">
+          {format === "text"
+            ? "Newlines preserved exactly. No HTML knowledge needed."
+            : "Write raw HTML. Use this for styled reports."}
+        </span>
+      </div>
       <TemplateTextarea
-        label="HTML body"
-        rows={6}
-        value={get(props, "html", "") as string}
-        onChange={(v) => set(props, "html", v)}
-        placeholder={'<p>Report attached.</p>\n<p>Row count: {{ $node.q1.rowCount }}</p>'}
+        label="Body"
+        rows={8}
+        value={body}
+        onChange={setBody}
+        placeholder={placeholder}
         refs={props.availableRefs}
       />
-      <AttachmentField {...props} />
     </div>
   );
 }

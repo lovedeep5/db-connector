@@ -67,12 +67,17 @@ export type EmailAttachment = {
 export async function sendEmail(args: {
   to: string[];
   subject: string;
-  html: string;
+  /** HTML body. Omit to send a plain-text-only email. */
+  html?: string;
+  /** Plain-text body. Required when `html` is omitted; otherwise used as a fallback. */
   text?: string;
   attachments?: EmailAttachment[];
   /** Optional connection id — use a specific SMTP connection instead of the workspace default. */
   smtpConnectionId?: string;
 }): Promise<{ messageId: string }> {
+  if (!args.html && !args.text) {
+    throw new Error("sendEmail: must provide html, text, or both");
+  }
   const { transport, from } = args.smtpConnectionId
     ? await getMailerFor(args.smtpConnectionId)
     : await getMailer();
