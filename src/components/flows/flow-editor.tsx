@@ -672,8 +672,9 @@ function FlowEditorInner({
             </TabsContent>
             <TabsContent value="output" className="m-0 p-4">
               <OutputPanel
-                selectedNodeId={selectedTrigger ? null : selectedNode?.id ?? null}
+                selectedNodeId={selectedNode?.id ?? null}
                 result={lastTestRun}
+                onSelectNode={setSelectedId}
               />
             </TabsContent>
             <TabsContent value="settings" className="m-0 p-4">
@@ -728,21 +729,36 @@ function Header({
   );
 }
 
-function OutputPanel({ selectedNodeId, result }: { selectedNodeId: string | null; result: TestRunResult | null }) {
+function OutputPanel({
+  selectedNodeId,
+  result,
+  onSelectNode,
+}: {
+  selectedNodeId: string | null;
+  result: TestRunResult | null;
+  onSelectNode?: (id: string) => void;
+}) {
   if (!result) {
     return <p className="text-sm text-muted-foreground">Run the flow with <strong>Test run</strong> to see per-node output here.</p>;
   }
   if (!selectedNodeId) {
     return (
       <div className="space-y-2 text-sm">
-        <p className="text-muted-foreground">Click a node on the canvas to see its result.</p>
+        <p className="text-muted-foreground">Click any row below (or a node on the canvas) to see its result.</p>
         <ul className="space-y-1 mt-3">
           {result.nodes.map((n) => (
-            <li key={n.nodeId} className="flex items-center gap-2 text-xs">
-              <StatusDot status={n.status} />
-              <span className="font-mono">{n.nodeId}</span>
-              <span className="text-muted-foreground">{n.nodeType}</span>
-              <span className="text-muted-foreground ml-auto">{n.durationMs}ms</span>
+            <li key={n.nodeId}>
+              <button
+                type="button"
+                onClick={() => onSelectNode?.(n.nodeId)}
+                className="w-full flex items-center gap-2 text-xs rounded px-2 py-1 hover:bg-accent transition-colors text-left"
+                disabled={!onSelectNode}
+              >
+                <StatusDot status={n.status} />
+                <span className="font-mono truncate">{n.nodeId}</span>
+                <span className="text-muted-foreground truncate">{n.nodeType}</span>
+                <span className="text-muted-foreground ml-auto shrink-0">{n.durationMs}ms</span>
+              </button>
             </li>
           ))}
         </ul>
