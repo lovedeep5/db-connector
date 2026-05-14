@@ -178,5 +178,7 @@ export async function deleteConnection(id: string) {
   revalidatePath("/credentials");
 }
 
-// Re-export so the form can use the same Zod for client-side validation if needed.
-export const _ConfigSchemaForReuse = ConfigSchema;
+// Note: don't re-export ConfigSchema here. Files with "use server" can only
+// export async functions — Next refuses to load the module otherwise. If a
+// client-side reuser ever needs the schema, factor it into a plain module
+// (e.g. src/lib/connections/schema.ts) and import it from both sides.
