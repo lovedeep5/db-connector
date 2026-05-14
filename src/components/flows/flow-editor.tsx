@@ -25,7 +25,7 @@ import { toast } from "sonner";
 import {
   Loader2, Save, ArrowLeft, Play, AlertCircle, CheckCircle2,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
-  Wand2, Maximize2,
+  Wand2, Maximize2, Settings as SettingsIcon,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -50,6 +50,8 @@ import { isTriggerType, TRIGGER_NODE_TYPES } from "@/lib/flows/types";
 import { normalizeFlowDefinition } from "@/lib/flows/definition";
 import { buildAvailableRefs } from "./refs-builder";
 import { buildJsCodeContextDts } from "./js-code-context";
+import { NodeModal } from "./node-modal";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 
 type Conn = { id: string; name: string; type: string };
 type Team = { id: string; name: string };
@@ -142,6 +144,13 @@ function FlowEditorInner({
     const first = (normalizedInitial?.nodes ?? []).find((n) => isTriggerType(n.type));
     return first?.id ?? null;
   });
+  // Double-click on a canvas node opens the rich 3-pane modal editor.
+  // Single-click keeps the existing lightweight right-sidebar inspector,
+  // so power users can still skim configs without a full modal pop.
+  const [modalNodeId, setModalNodeId] = React.useState<string | null>(null);
+  // Global flow settings used to live in a sidebar tab; the topbar button
+  // now opens this dialog instead, freeing the sidebar for node config.
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
 
   // ── Undo / redo ────────────────────────────────────────────────────────
   // History stack snapshotted at structural change boundaries (add / remove
@@ -541,6 +550,7 @@ function FlowEditorInner({
         onTestRun={testRun}
         testing={testing}
         lastTestRun={lastTestRun}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -582,6 +592,10 @@ function FlowEditorInner({
             onEdgesChange={handleEdgesChange}
             onConnect={handleConnect}
             onNodeClick={(_e, n) => setSelectedId(n.id)}
+            onNodeDoubleClick={(_e, n) => {
+              setSelectedId(n.id);
+              setModalNodeId(n.id);
+            }}
             onPaneClick={() => setSelectedId(null)}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
@@ -629,7 +643,6 @@ function FlowEditorInner({
               <TabsList>
                 <TabsTrigger value="config">Inspector</TabsTrigger>
                 <TabsTrigger value="output">Output</TabsTrigger>
-                <TabsTrigger value="settings">Settings</TabsTrigger>
               </TabsList>
               <Button
                 size="icon"
@@ -677,19 +690,78 @@ function FlowEditorInner({
                 onSelectNode={setSelectedId}
               />
             </TabsContent>
-            <TabsContent value="settings" className="m-0 p-4 flex-1 overflow-y-auto">
-              <SettingsForm meta={meta} setMeta={setMeta} myTeams={myTeams} />
-            </TabsContent>
           </Tabs>
         </aside>
         )}
       </div>
+
+      {/* Rich per-node editor: opens on double-click. Shares all the same
+          handlers as the sidebar Inspector so config edits flow through one
+          path; "Run this step" closes the modal-less data lookups since the
+          full result lands in lastTestRun and the right column re-reads it. */}
+      <NodeModal
+        open={modalNodeId !== null}
+        onOpenChange={(o) => { if (!o) setModalNodeId(null); }}
+        selectedNode={nodes.find((n) => n.id === modalNodeId)}
+        nodes={nodes}
+        edges={edges}
+        lastTestRun={lastTestRun}
+        onConfigChange={onConfigChange}
+        onDelete={() => { onDeleteSelected(); setModalNodeId(null); }}
+        onRunStep={runStep}
+        runningStep={steppingId === modalNodeId}
+        configProps={{
+          connections,
+          availableRefs,
+          jsCodeContextDts,
+          flowId,
+        }}
+      />
+
+      {/* Flow-level settings dialog: was a sidebar tab before, now a topbar
+          button. Same SettingsForm, just lifted out so the sidebar can stay
+          focused on per-node editing. */}
+      <FlowSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        meta={meta}
+        setMeta={setMeta}
+        myTeams={myTeams}
+      />
     </div>
   );
 }
 
+function FlowSettingsDialog({
+  open,
+  onOpenChange,
+  meta,
+  setMeta,
+  myTeams,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  meta: FlowMeta;
+  setMeta: (m: FlowMeta) => void;
+  myTeams: Team[];
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Flow settings</DialogTitle>
+          <DialogDescription>
+            How this flow runs and who can see it. Changes are saved with the flow.
+          </DialogDescription>
+        </DialogHeader>
+        <SettingsForm meta={meta} setMeta={setMeta} myTeams={myTeams} />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function Header({
-  meta, setMeta, onBack, onSave, saving, onTestRun, testing, lastTestRun,
+  meta, setMeta, onBack, onSave, saving, onTestRun, testing, lastTestRun, onOpenSettings,
 }: {
   meta: FlowMeta;
   setMeta: (m: FlowMeta) => void;
@@ -699,6 +771,7 @@ function Header({
   onTestRun: () => void;
   testing: boolean;
   lastTestRun: TestRunResult | null;
+  onOpenSettings: () => void;
 }) {
   return (
     <div className="border-b p-3 flex items-center gap-3 bg-card/40">
@@ -719,6 +792,9 @@ function Header({
         </Badge>
       )}
       <div className="flex-1" />
+      <Button variant="ghost" size="icon" onClick={onOpenSettings} title="Flow settings">
+        <SettingsIcon className="h-4 w-4" />
+      </Button>
       <Button variant="outline" onClick={onTestRun} disabled={testing}>
         {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} Test run
       </Button>
