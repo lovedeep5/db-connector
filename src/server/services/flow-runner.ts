@@ -4,6 +4,7 @@ import { getNode } from "@/lib/flows/registry";
 import { ensureNodesRegistered } from "@/lib/flows/nodes";
 import { applyTemplate, buildScope } from "@/lib/flows/templating";
 import { iterSubgraphFor, topoSortSubset } from "@/lib/flows/loop-graph";
+import { parseAndNormalize } from "@/lib/flows/definition";
 import {
   bodySinks,
   chunk,
@@ -16,6 +17,7 @@ import type {
   FlowNode,
   TriggerPayload,
 } from "@/lib/flows/types";
+import { isTriggerType } from "@/lib/flows/types";
 
 ensureNodesRegistered();
 
@@ -30,6 +32,13 @@ export type StartRunOpts = {
   flowId: string;
   trigger: TriggerPayload;
   startedBy?: string | null;
+  /**
+   * Id of the trigger node that fired this run. With v2 multi-trigger flows
+   * the runner uses this to restrict execution to that trigger's downstream;
+   * other trigger subgraphs in the same flow stay dormant. Omit for legacy
+   * single-trigger flows (the runner falls back to "all root nodes").
+   */
+  entryTriggerId?: string;
 };
 
 export class FlowConcurrencyError extends Error {
@@ -77,7 +86,7 @@ export async function runFlow(opts: StartRunOpts): Promise<{ runId: string; stat
   let errorMessage: string | null = null;
 
   try {
-    await executeNodes(flow, def, run.id, opts.trigger);
+    await executeNodes(flow, def, run.id, opts.trigger, opts.entryTriggerId);
   } catch (e) {
     status = "error";
     errorMessage = (e as Error).message;
@@ -109,11 +118,10 @@ async function loadFlow(flowId: string) {
 }
 
 function parseDefinition(raw: string): FlowDefinition {
-  try {
-    return JSON.parse(raw) as FlowDefinition;
-  } catch {
-    throw new Error("Flow definition is not valid JSON");
-  }
+  // Always normalize to v2 (triggers in nodes[]) so the rest of the runner
+  // walks a single uniform shape. parseAndNormalize throws on malformed JSON
+  // with a friendly message.
+  return parseAndNormalize(raw);
 }
 
 function serialiseTrigger(t: TriggerPayload): unknown {
@@ -125,16 +133,43 @@ async function executeNodes(
   flow: typeof schema.flows.$inferSelect,
   def: FlowDefinition,
   runId: string,
-  trigger: TriggerPayload
+  trigger: TriggerPayload,
+  entryTriggerId?: string
 ) {
   const order = topoSort(def.nodes, def.edges);
   const prevOutputs = new Map<string, unknown>();
-  const reachable = initialReachable(def);
+  const reachable = initialReachable(def, entryTriggerId);
   /** Nodes already executed as part of a loop's iter body — skip in the outer pass. */
   const consumedByLoop = new Set<string>();
 
+  // Trigger nodes live in `nodes[]` but never go through execute() — they're
+  // entry points, not steps. Pre-seed prevOutputs with the firing trigger's
+  // payload so `{{ $node.<triggerId>.body }}` etc. works for templating.
+  // Non-firing triggers get null so downstream that mistakenly references
+  // them sees nothing (they're also not in `reachable`, so their downstream
+  // doesn't run).
+  const triggerNodeIds = new Set<string>();
+  for (const n of def.nodes) {
+    if (isTriggerType(n.type)) {
+      triggerNodeIds.add(n.id);
+      prevOutputs.set(
+        n.id,
+        n.id === entryTriggerId ? triggerForScope(trigger) : null
+      );
+    }
+  }
+
   for (const node of order) {
     if (consumedByLoop.has(node.id)) continue;
+    // Triggers themselves don't execute — they're entry points. If the
+    // trigger is the one that fired this run, propagate its downstream
+    // edges into `reachable`; otherwise leave its branch dormant.
+    if (triggerNodeIds.has(node.id)) {
+      if (reachable.has(node.id)) {
+        propagateReachable(node.id, undefined, def.edges, reachable);
+      }
+      continue;
+    }
     if (!reachable.has(node.id)) {
       // Upstream branching deactivated this path — skip without erroring.
       await db.insert(schema.flowNodeRuns).values({
@@ -491,16 +526,24 @@ function propagateBody(
 }
 
 /**
- * A node is initially reachable if it has no incoming edges from other nodes
- * in the DAG, OR has an incoming edge from outside the node set (the trigger
- * sentinel "__trigger__" lives there and is always "fired").
+ * Initial reachability for the topo pass.
+ *
+ *  - If `entryTriggerId` is supplied (multi-trigger v2 fire), only THAT
+ *    trigger node is initially reachable. The main loop then propagates
+ *    downstream as each node finishes — other trigger subgraphs stay
+ *    dormant for this run.
+ *  - Otherwise (legacy / test runs without a chosen entry), every node
+ *    with no DAG-internal incoming edge is a root.
  */
-function initialReachable(def: FlowDefinition): Set<string> {
+function initialReachable(def: FlowDefinition, entryTriggerId?: string): Set<string> {
+  if (entryTriggerId && def.nodes.some((n) => n.id === entryTriggerId)) {
+    return new Set<string>([entryTriggerId]);
+  }
   const nodeIds = new Set(def.nodes.map((n) => n.id));
   const incomingFromDag = new Map<string, number>();
   for (const e of def.edges) {
     if (!nodeIds.has(e.target)) continue;
-    if (!nodeIds.has(e.source)) continue; // edges from trigger are filtered here
+    if (!nodeIds.has(e.source)) continue;
     incomingFromDag.set(e.target, (incomingFromDag.get(e.target) ?? 0) + 1);
   }
   const reachable = new Set<string>();

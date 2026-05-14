@@ -26,6 +26,8 @@ import type {
   FlowNode,
   TriggerPayload,
 } from "@/lib/flows/types";
+import { isTriggerType } from "@/lib/flows/types";
+import { normalizeFlowDefinition, pickEntryTrigger } from "@/lib/flows/definition";
 
 ensureNodesRegistered();
 
@@ -63,6 +65,12 @@ export type TestRunOpts = {
   defaultNodeTimeoutMs?: number;
   trigger?: TriggerPayload;
   /**
+   * Id of the trigger node that "fires" this test run. Defaults to the
+   * first manual trigger, else the first trigger in the canvas. Pass
+   * explicitly to test a specific entry point in a multi-trigger flow.
+   */
+  entryTriggerId?: string;
+  /**
    * Called as each node begins and finishes execution. Optional — the
    * non-streaming Server Action path doesn't subscribe; the streaming
    * route handler does, to relay events to the client.
@@ -72,15 +80,31 @@ export type TestRunOpts = {
 
 export async function testRunFlow(opts: TestRunOpts): Promise<TestRunResult> {
   const started = Date.now();
-  const def = opts.definition;
+  // Normalize v1 → v2 in case the editor sent us legacy shape. After this,
+  // triggers live in def.nodes and we can route reachability via entryTriggerId.
+  const def = normalizeFlowDefinition(opts.definition);
   const trigger: TriggerPayload = opts.trigger ?? { kind: "manual", startedBy: opts.userId };
   const defaultTimeout = opts.defaultNodeTimeoutMs ?? 60_000;
+  const entryTriggerId = opts.entryTriggerId ?? pickEntryTrigger(def)?.id;
 
   const order = topoSort(def.nodes, def.edges);
   const prevOutputs = new Map<string, unknown>();
-  const reachable = initialReachable(def);
+  const reachable = initialReachable(def, entryTriggerId);
   const consumedByLoop = new Set<string>();
   const results: TestNodeResult[] = [];
+
+  // Triggers don't execute — pre-seed prevOutputs with the firing trigger's
+  // payload so $node.<triggerId>.* references resolve during templating.
+  const triggerNodeIds = new Set<string>();
+  for (const n of def.nodes) {
+    if (isTriggerType(n.type)) {
+      triggerNodeIds.add(n.id);
+      prevOutputs.set(
+        n.id,
+        n.id === entryTriggerId ? triggerForScope(trigger) : null
+      );
+    }
+  }
 
   // Event helpers — the streaming route subscribes via opts.onEvent.
   const emit = (e: TestRunEvent) => opts.onEvent?.(e);
@@ -97,6 +121,13 @@ export async function testRunFlow(opts: TestRunOpts): Promise<TestRunResult> {
 
   for (const node of order) {
     if (consumedByLoop.has(node.id)) continue;
+    // Triggers don't execute — propagate downstream if this trigger fired.
+    if (triggerNodeIds.has(node.id)) {
+      if (reachable.has(node.id)) {
+        propagateReachable(node.id, undefined, def.edges, reachable);
+      }
+      continue;
+    }
     if (!reachable.has(node.id)) {
       record({
         nodeId: node.id,
@@ -219,7 +250,10 @@ function triggerForScope(t: TriggerPayload): unknown {
   return t;
 }
 
-function initialReachable(def: FlowDefinition): Set<string> {
+function initialReachable(def: FlowDefinition, entryTriggerId?: string): Set<string> {
+  if (entryTriggerId && def.nodes.some((n) => n.id === entryTriggerId)) {
+    return new Set<string>([entryTriggerId]);
+  }
   const nodeIds = new Set(def.nodes.map((n) => n.id));
   const incomingFromDag = new Map<string, number>();
   for (const e of def.edges) {

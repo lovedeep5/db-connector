@@ -10,12 +10,19 @@ import { loadEffectivePermissions } from "@/lib/rbac";
 import { refreshOneFlow, unregisterFlow } from "@/lib/flows/scheduler-glue";
 import { refreshOneS3Trigger, unregisterTrigger as unregisterS3Trigger } from "@/lib/flows/s3-poller";
 import { runFlow } from "@/server/services/flow-runner";
-import type { FlowDefinition } from "@/lib/flows/types";
+import { parseAndNormalize } from "@/lib/flows/definition";
+import { isTriggerType, type FlowDefinition } from "@/lib/flows/types";
 
 const TriggerSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("schedule"), config: z.object({ cron: z.string().min(1) }) }),
   z.object({ type: z.literal("manual"), config: z.object({}).strict() }),
-  z.object({ type: z.literal("webhook"), config: z.object({ method: z.enum(["GET", "POST"]).optional() }) }),
+  z.object({
+    type: z.literal("webhook"),
+    config: z.object({
+      method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
+      secret: z.string().optional(),
+    }),
+  }),
   z.object({
     type: z.literal("s3.objectCreated"),
     config: z.object({
@@ -31,8 +38,9 @@ const TriggerSchema = z.discriminatedUnion("type", [
 ]);
 
 const DefinitionSchema: z.ZodType<FlowDefinition> = z.object({
-  version: z.literal(1),
-  trigger: TriggerSchema,
+  version: z.union([z.literal(1), z.literal(2)]),
+  // v1 only: optional legacy single trigger. v2 puts triggers in nodes[].
+  trigger: TriggerSchema.optional(),
   nodes: z.array(
     z.object({
       id: z.string().min(1),
@@ -63,8 +71,23 @@ const FlowInput = z.object({
   maxConcurrentRuns: z.coerce.number().int().min(1).max(100).default(10),
   defaultNodeTimeoutMs: z.coerce.number().int().min(1_000).max(24 * 60 * 60 * 1000).default(60_000),
 }).superRefine((v, ctx) => {
-  if (v.definition.trigger.type === "schedule" && !cron.validate(v.definition.trigger.config.cron)) {
+  // v1: validate legacy single trigger cron.
+  if (v.definition.trigger?.type === "schedule" && !cron.validate(v.definition.trigger.config.cron)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["definition", "trigger", "config", "cron"], message: "Invalid cron" });
+  }
+  // v2: validate every schedule trigger node's cron expression.
+  for (let i = 0; i < v.definition.nodes.length; i++) {
+    const n = v.definition.nodes[i];
+    if (n.type === "schedule") {
+      const expr = (n.config as { cron?: unknown }).cron;
+      if (typeof expr !== "string" || !cron.validate(expr)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["definition", "nodes", i, "config", "cron"],
+          message: "Invalid cron",
+        });
+      }
+    }
   }
   if (v.visibility === "team" && !v.sharedWithTeamId) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["sharedWithTeamId"], message: "Pick a team" });
@@ -84,7 +107,10 @@ export async function createFlow(input: FlowInput): Promise<string> {
   const user = await requireUser();
   const data = FlowInput.parse(input);
   const sharedWithTeamId = data.visibility === "team" ? data.sharedWithTeamId ?? null : null;
-  const webhookSecret = data.definition.trigger.type === "webhook" ? generateSecret() : null;
+  // v2: secrets live per-webhook-trigger inside the node config (the editor
+  // generates them when the user toggles secret on). The flow-level column
+  // is left null for new rows; legacy values are only read as a fallback.
+  const webhookSecret: string | null = null;
   const now = new Date();
   const [row] = await db
     .insert(schema.flows)
@@ -115,10 +141,10 @@ export async function updateFlow(id: string, input: FlowInput): Promise<void> {
   const existing = await loadFlowOrThrow(id, user.id, user.isSuperAdmin);
   const data = FlowInput.parse(input);
   const sharedWithTeamId = data.visibility === "team" ? data.sharedWithTeamId ?? null : null;
-  // Generate a secret on first webhook trigger; reuse otherwise.
-  let webhookSecret = existing.webhookSecret;
-  if (data.definition.trigger.type === "webhook" && !webhookSecret) webhookSecret = generateSecret();
-  if (data.definition.trigger.type !== "webhook") webhookSecret = null;
+  // v2: secrets live per-webhook-trigger in node config. We keep the legacy
+  // column populated only if it already had a value (don't wipe — the old
+  // webhook URL still resolves it as a fallback). New rows write null.
+  const webhookSecret = existing.webhookSecret;
   await db
     .update(schema.flows)
     .set({
@@ -165,11 +191,18 @@ export async function deleteFlow(id: string): Promise<void> {
 
 export async function runFlowNow(id: string): Promise<{ runId: string; status: string }> {
   const user = await requireUser();
-  await loadFlowOrThrow(id, user.id, user.isSuperAdmin);
+  const row = await loadFlowOrThrow(id, user.id, user.isSuperAdmin);
+  // Multi-trigger: prefer the first manual trigger so "Run now" only fires
+  // that subgraph. Falls back to whatever the first trigger is — for flows
+  // with no manual trigger, the user can still smoke-test from the canvas.
+  const def = parseAndNormalize(row.definition);
+  const manual = def.nodes.find((n) => n.type === "manual");
+  const entryTriggerId = manual?.id ?? def.nodes.find((n) => isTriggerType(n.type))?.id;
   return runFlow({
     flowId: id,
     trigger: { kind: "manual", startedBy: user.id },
     startedBy: user.id,
+    entryTriggerId,
   });
 }
 
@@ -205,12 +238,17 @@ export async function createSampleFlow(): Promise<string> {
   const QUERY_ID = "query_1";
   const FILE_ID = "to_file_1";
   const EMAIL_ID = "email_1";
-  const TRIGGER_ID = "__trigger__";
+  const TRIGGER_ID = "trigger_manual_sample";
 
   const definition: FlowDefinition = {
-    version: 1,
-    trigger: { type: "manual", config: {} as never },
+    version: 2,
     nodes: [
+      {
+        id: TRIGGER_ID,
+        type: "manual",
+        position: { x: 80, y: 160 },
+        config: {},
+      },
       {
         id: QUERY_ID,
         type: "db.query",

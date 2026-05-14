@@ -15,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { createConnection, testConfig } from "@/server/actions/connections";
+import { createConnection, testConfig, updateConnection } from "@/server/actions/connections";
 
 const Schema = z
   .object({
@@ -109,7 +109,17 @@ function buildConfig(values: FormValues) {
   }
 }
 
-export function ConnectionForm({ canCreateShared }: { canCreateShared?: boolean }) {
+export function ConnectionForm({
+  canCreateShared,
+  editId,
+  initial,
+}: {
+  canCreateShared?: boolean;
+  /** When set, the form is in edit mode and submits via `updateConnection`. */
+  editId?: string;
+  /** Prefill values for edit mode. */
+  initial?: Partial<FormValues>;
+}) {
   const router = useRouter();
   const {
     register,
@@ -121,7 +131,13 @@ export function ConnectionForm({ canCreateShared }: { canCreateShared?: boolean 
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(Schema),
-    defaultValues: { type: "postgres", ssl: false, port: "5432", visibility: "private" },
+    defaultValues: {
+      type: "postgres",
+      ssl: false,
+      port: "5432",
+      visibility: "private",
+      ...initial,
+    },
   });
   const [testing, setTesting] = React.useState(false);
   const [testResult, setTestResult] = React.useState<null | { ok: boolean; message?: string; serverVersion?: string }>(null);
@@ -152,13 +168,19 @@ export function ConnectionForm({ canCreateShared }: { canCreateShared?: boolean 
 
   const onSubmit = async (values: FormValues) => {
     try {
-      await createConnection({
+      const payload = {
         name: values.name,
         description: values.description ?? null,
         config: buildConfig(values),
         visibility: values.visibility,
-      });
-      toast.success("Credential saved");
+      };
+      if (editId) {
+        await updateConnection(editId, payload);
+        toast.success("Credential updated");
+      } else {
+        await createConnection(payload);
+        toast.success("Credential saved");
+      }
       router.push("/credentials");
       router.refresh();
     } catch (e) {

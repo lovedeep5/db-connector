@@ -8,8 +8,8 @@ import type { FlowDefinition } from "@/lib/flows/types";
 export const runtime = "nodejs";
 
 const DefSchema = z.object({
-  version: z.literal(1),
-  trigger: z.object({ type: z.string(), config: z.record(z.unknown()) }),
+  version: z.union([z.literal(1), z.literal(2)]),
+  trigger: z.object({ type: z.string(), config: z.record(z.unknown()) }).optional(),
   nodes: z.array(
     z.object({
       id: z.string(),

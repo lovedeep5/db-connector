@@ -89,8 +89,9 @@ export default async function CredentialsPage({
           {filtered.map((c) => {
             const isMine = c.createdBy === user.id;
             const TypeIcon = TYPE_ICON[c.type] ?? KeyRound;
-            return (
-              <Card key={c.id} className="p-5 space-y-3 hover:shadow-md transition-shadow">
+            const canEdit = perms.isSuperAdmin || isMine;
+            const inner = (
+              <Card className="p-5 space-y-3 hover:shadow-md hover:border-primary/30 transition-all cursor-pointer">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <h3 className="font-medium truncate flex items-center gap-1.5">
@@ -106,7 +107,17 @@ export default async function CredentialsPage({
                 {c.description && (
                   <p className="text-sm text-muted-foreground line-clamp-2">{c.description}</p>
                 )}
+                {canEdit && (
+                  <p className="text-[10px] text-muted-foreground/70">Click to edit</p>
+                )}
               </Card>
+            );
+            return canEdit ? (
+              <Link key={c.id} href={`/credentials/${c.id}/edit`} className="block">
+                {inner}
+              </Link>
+            ) : (
+              <div key={c.id} className="block">{inner}</div>
             );
           })}
         </div>

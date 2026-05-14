@@ -12,6 +12,7 @@
  * refs (.count, .results, .inputs).
  */
 import type { FlowDefinition, FlowNode, TriggerSpec } from "@/lib/flows/types";
+import { isTriggerType } from "@/lib/flows/types";
 import { ancestorsOf } from "@/lib/flows/subflow";
 import { iterSubgraphFor } from "@/lib/flows/loop-graph";
 import type { TestRunResult } from "@/server/services/flow-test-runner";
@@ -99,10 +100,23 @@ export function buildAvailableRefs(args: {
   const { definition, selectedNodeId, lastTestRun } = args;
   const groups: RefGroup[] = [];
 
-  // Trigger group
-  const triggerPaths = pathsForTrigger(definition.trigger, lastTestRun);
-  if (triggerPaths.length > 0) {
-    groups.push({ label: "Trigger", paths: triggerPaths });
+  // Trigger group — v2 flows put triggers in nodes[]; we surface refs for
+  // each trigger node (when there are several) plus the legacy `$trigger.*`
+  // alias for the currently-active one. With no triggers at all the group
+  // is omitted.
+  const triggers = definition.nodes.filter((n) => isTriggerType(n.type));
+  // Legacy: v1 had `definition.trigger`. If present, use it for the
+  // `$trigger.*` alias; otherwise grab the first trigger node.
+  const aliasTrigger: TriggerSpec | undefined =
+    definition.trigger ??
+    (triggers[0]
+      ? ({ type: triggers[0].type, config: triggers[0].config } as TriggerSpec)
+      : undefined);
+  if (aliasTrigger) {
+    const triggerPaths = pathsForTrigger(aliasTrigger, lastTestRun);
+    if (triggerPaths.length > 0) {
+      groups.push({ label: "Trigger", paths: triggerPaths });
+    }
   }
 
   // Pre-compute which loop ancestors the selected node sits inside the body of.

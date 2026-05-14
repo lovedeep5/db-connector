@@ -2,18 +2,47 @@ import type { ZodTypeAny } from "zod";
 
 /**
  * Shape of a flow's DAG. Stored in `flows.definition` as JSON.
+ *
+ * v1 had a separate `trigger: TriggerSpec` field — exactly one trigger.
+ * v2 makes triggers first-class members of `nodes[]` so a flow can have
+ * any number of them (e.g. run on schedule AND let users hit a webhook
+ * on demand). `trigger` is kept as an OPTIONAL legacy field; on load,
+ * `normalizeFlowDefinition` hoists it into `nodes[]` as the canonical
+ * shape so all downstream code works the same way.
  */
 export type FlowDefinition = {
-  version: 1;
-  trigger: TriggerSpec;
+  version: 1 | 2;
+  /** Legacy v1 single trigger. Always undefined after normalization. */
+  trigger?: TriggerSpec;
   nodes: FlowNode[];
   edges: FlowEdge[];
 };
 
+/** Catalog types that are entry-points rather than executable steps. */
+export const TRIGGER_NODE_TYPES = [
+  "schedule",
+  "manual",
+  "webhook",
+  "s3.objectCreated",
+] as const;
+export type TriggerNodeType = typeof TRIGGER_NODE_TYPES[number];
+
+export function isTriggerType(t: string): t is TriggerNodeType {
+  return (TRIGGER_NODE_TYPES as readonly string[]).includes(t);
+}
+
 export type TriggerSpec =
   | { type: "schedule"; config: { cron: string } }
   | { type: "manual"; config: Record<string, never> }
-  | { type: "webhook"; config: { method?: "POST" | "GET" } }
+  | {
+      type: "webhook";
+      config: {
+        /** HTTP method accepted on the inbound URL. */
+        method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+        /** Optional shared secret. When set, requests MUST send it as the X-Webhook-Secret header. */
+        secret?: string;
+      };
+    }
   | {
       type: "s3.objectCreated";
       config: {

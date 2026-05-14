@@ -23,7 +23,7 @@ import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
-  Loader2, Save, ArrowLeft, Webhook, Copy, Play, AlertCircle, CheckCircle2,
+  Loader2, Save, ArrowLeft, Play, AlertCircle, CheckCircle2,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
   Wand2, Maximize2,
 } from "lucide-react";
@@ -40,12 +40,14 @@ import { CanvasNode } from "./canvas-node";
 import { DeletableEdge } from "./deletable-edge";
 import { NodePalette, NODE_DRAG_TYPE } from "./node-palette";
 import { NodeConfig } from "./node-config";
-import { TRIGGER_CATALOG, findCatalog } from "./node-catalog";
+import { findCatalog } from "./node-catalog";
 import { applyDagreLayout } from "./auto-layout";
 import { createFlow, updateFlow } from "@/server/actions/flows";
 import { testRunFlowAction, testRunUpToNodeAction } from "@/server/actions/flow-test";
 import type { TestNodeResult, TestRunResult } from "@/server/services/flow-test-runner";
-import type { FlowDefinition, FlowNode as DefNode, FlowEdge, TriggerSpec } from "@/lib/flows/types";
+import type { FlowDefinition, FlowNode as DefNode, FlowEdge } from "@/lib/flows/types";
+import { isTriggerType, TRIGGER_NODE_TYPES } from "@/lib/flows/types";
+import { normalizeFlowDefinition } from "@/lib/flows/definition";
 import { buildAvailableRefs } from "./refs-builder";
 import { buildJsCodeContextDts } from "./js-code-context";
 
@@ -67,7 +69,6 @@ type FlowMeta = {
 
 const nodeTypes: NodeTypes = { dbcNode: CanvasNode };
 const edgeTypes: EdgeTypes = { deletable: DeletableEdge };
-const TRIGGER_ID = "__trigger__";
 
 export function FlowEditor(props: {
   mode: "create" | "edit";
@@ -120,12 +121,15 @@ function FlowEditorInner({
       defaultNodeTimeoutMs: 60_000,
     }
   );
-  const [trigger, setTrigger] = React.useState<TriggerSpec>(
-    initial?.trigger ?? { type: "schedule", config: { cron: "0 9 * * *" } }
+  // v2: triggers are first-class entries in `nodes`. Normalize any legacy v1
+  // definition on load so the editor only deals with one shape.
+  const normalizedInitial = React.useMemo(
+    () => (initial ? normalizeFlowDefinition(initial) : undefined),
+    [initial]
   );
-  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(defaultNodes(initial, trigger));
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>(defaultNodes(normalizedInitial));
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(
-    (initial?.edges ?? []).map((e) => ({
+    (normalizedInitial?.edges ?? []).map((e) => ({
       id: e.id,
       source: e.source,
       target: e.target,
@@ -133,7 +137,11 @@ function FlowEditorInner({
       type: "deletable",
     }))
   );
-  const [selectedId, setSelectedId] = React.useState<string | null>(TRIGGER_ID);
+  // Default selection: the first trigger if any, else nothing.
+  const [selectedId, setSelectedId] = React.useState<string | null>(() => {
+    const first = (normalizedInitial?.nodes ?? []).find((n) => isTriggerType(n.type));
+    return first?.id ?? null;
+  });
 
   // ── Undo / redo ────────────────────────────────────────────────────────
   // History stack snapshotted at structural change boundaries (add / remove
@@ -188,18 +196,17 @@ function FlowEditorInner({
 
   const handleNodesChange = React.useCallback(
     (changes: NodeChange[]) => {
-      const filtered = changes.filter((c) => !(c.type === "remove" && c.id === TRIGGER_ID));
       // Snapshot history before applying any structural change. We treat
       // `add` / `remove` / drag-stop as structural; `position` mid-drag and
       // pure `select` changes are too chatty to record.
-      const structural = filtered.some(
+      const structural = changes.some(
         (c) =>
           c.type === "add" ||
           c.type === "remove" ||
           (c.type === "position" && c.dragging === false)
       );
       if (structural) captureSnapshot();
-      onNodesChange(filtered);
+      onNodesChange(changes);
     },
     [onNodesChange, captureSnapshot]
   );
@@ -276,29 +283,9 @@ function FlowEditorInner({
       e.preventDefault();
       const cat = findCatalog(type);
       if (!cat) return;
-      // Dropping a trigger replaces the flow's existing trigger — same
-      // behaviour as picking one from the trigger-kind dropdown, since a
-      // flow has exactly one entry point.
-      if (cat.isTrigger) {
-        const next: TriggerSpec =
-          type === "schedule"
-            ? { type: "schedule", config: { cron: "0 9 * * *" } }
-            : type === "webhook"
-            ? { type: "webhook", config: {} }
-            : type === "s3.objectCreated"
-            ? { type: "s3.objectCreated", config: { connectionId: "", bucket: "", prefix: "", suffix: "", pollIntervalSec: 60, mode: "skipExisting", maxBatch: 50 } }
-            : { type: "manual", config: {} as never };
-        setTrigger(next);
-        setNodes((ns) =>
-          ns.map((n) =>
-            n.id === TRIGGER_ID
-              ? { ...n, data: { ...n.data, type, label: cat.label } }
-              : n
-          )
-        );
-        setSelectedId(TRIGGER_ID);
-        return;
-      }
+      // Triggers and action nodes both add to the canvas. v2: triggers are
+      // first-class members of `nodes[]` — drop a second trigger to add an
+      // alternate entry point (e.g. schedule + webhook on the same flow).
       const position = screenToFlowPosition({ x: e.clientX, y: e.clientY });
       const id = `${type.replace(/\W/g, "_")}_${Math.random().toString(36).slice(2, 7)}`;
       setNodes((ns) => [
@@ -307,7 +294,12 @@ function FlowEditorInner({
           id,
           type: "dbcNode",
           position,
-          data: { label: cat.label, type, isTrigger: false, config: defaultConfigFor(type) },
+          data: {
+            label: cat.label,
+            type,
+            isTrigger: cat.isTrigger ?? false,
+            config: defaultConfigFor(type),
+          },
         },
       ]);
       setSelectedId(id);
@@ -318,75 +310,56 @@ function FlowEditorInner({
   const addNode = (type: string) => {
     const cat = findCatalog(type);
     if (!cat) return;
-    // Triggers aren't a stack — a flow has exactly one. Picking a trigger
-    // type from the palette replaces the current one and focuses the trigger
-    // sentinel, identical to the explicit "change trigger kind" dropdown.
-    if (cat.isTrigger) {
-      onTriggerKindChange(type as TriggerSpec["type"]);
-      return;
-    }
     const id = `${type.replace(/\W/g, "_")}_${Math.random().toString(36).slice(2, 7)}`;
+    // Triggers default to the left edge so they look like entry points;
+    // actions cascade further right.
+    const triggerCount = nodes.filter(
+      (n) => isTriggerType(((n.data as Record<string, unknown>).type as string) ?? "")
+    ).length;
+    const position = cat.isTrigger
+      ? { x: 80, y: 160 + triggerCount * 100 }
+      : { x: 280 + (nodes.length - 1) * 240, y: 160 + ((nodes.length - 1) % 3) * 80 };
     setNodes((ns) => [
       ...ns,
       {
         id,
         type: "dbcNode",
-        position: { x: 280 + (ns.length - 1) * 240, y: 160 + ((ns.length - 1) % 3) * 80 },
-        data: { label: cat.label, type, isTrigger: false, config: defaultConfigFor(type) },
+        position,
+        data: {
+          label: cat.label,
+          type,
+          isTrigger: cat.isTrigger ?? false,
+          config: defaultConfigFor(type),
+        },
       },
     ]);
     setSelectedId(id);
   };
 
   const selectedNode = nodes.find((n) => n.id === selectedId);
-  const selectedTrigger = selectedId === TRIGGER_ID;
+  // True when the currently-selected node is a trigger node (v2: triggers
+  // live in `nodes[]`). Used by the Inspector to render trigger config forms
+  // and by the OutputPanel to suppress run results for entry points.
+  const selectedTrigger = !!selectedNode && isTriggerType(
+    ((selectedNode.data as Record<string, unknown>).type as string) ?? ""
+  );
 
   const onConfigChange = (cfg: Record<string, unknown>) => {
-    if (selectedTrigger) {
-      setTrigger((t) => ({ type: t.type, config: cfg } as TriggerSpec));
-      return;
-    }
     if (!selectedNode) return;
     setNodes((ns) =>
-      ns.map((n) => (n.id === selectedNode.id ? { ...n, data: { ...n.data, config: cfg, summary: summarise(n.data.type as string, cfg) } } : n))
+      ns.map((n) =>
+        n.id === selectedNode.id
+          ? { ...n, data: { ...n.data, config: cfg, summary: summarise(n.data.type as string, cfg) } }
+          : n
+      )
     );
   };
 
   const onDeleteSelected = () => {
-    if (!selectedNode || selectedTrigger) return;
+    if (!selectedNode) return;
     setNodes((ns) => ns.filter((n) => n.id !== selectedNode.id));
     setEdges((es) => es.filter((e) => e.source !== selectedNode.id && e.target !== selectedNode.id));
-    setSelectedId(TRIGGER_ID);
-  };
-
-  const onTriggerKindChange = (kind: TriggerSpec["type"]) => {
-    const next: TriggerSpec =
-      kind === "schedule"
-        ? { type: "schedule", config: { cron: "0 9 * * *" } }
-        : kind === "webhook"
-        ? { type: "webhook", config: {} }
-        : kind === "s3.objectCreated"
-        ? {
-            type: "s3.objectCreated",
-            config: {
-              connectionId: "",
-              bucket: "",
-              prefix: "",
-              suffix: "",
-              pollIntervalSec: 60,
-              mode: "skipExisting",
-              maxBatch: 50,
-            },
-          }
-        : { type: "manual", config: {} as never };
-    setTrigger(next);
-    setNodes((ns) =>
-      ns.map((n) =>
-        n.id === TRIGGER_ID
-          ? { ...n, data: { ...n.data, type: kind, label: findCatalog(kind)?.label ?? kind } }
-          : n
-      )
-    );
+    setSelectedId(null);
   };
 
   // Canvas nodes get a `lastRunStatus` annotation when a test run completes,
@@ -395,7 +368,6 @@ function FlowEditorInner({
   React.useEffect(() => {
     setNodes((ns) =>
       ns.map((n) => {
-        if (n.id === TRIGGER_ID) return n;
         const r = lastTestRun?.nodes.find((x) => x.nodeId === n.id);
         const isRunning = runningNodeId === n.id;
         return { ...n, data: { ...n.data, lastRunStatus: r?.status, isRunning } };
@@ -405,23 +377,20 @@ function FlowEditorInner({
   }, [lastTestRun, runningNodeId]);
 
   const currentDefinition = React.useCallback<() => FlowDefinition>(() => ({
-    version: 1,
-    trigger,
-    nodes: nodes
-      .filter((n) => n.id !== TRIGGER_ID)
-      .map<DefNode>((n) => ({
-        id: n.id,
-        type: (n.data as Record<string, unknown>).type as string,
-        config: ((n.data as Record<string, unknown>).config as Record<string, unknown>) ?? {},
-        position: n.position,
-      })),
+    version: 2,
+    nodes: nodes.map<DefNode>((n) => ({
+      id: n.id,
+      type: (n.data as Record<string, unknown>).type as string,
+      config: ((n.data as Record<string, unknown>).config as Record<string, unknown>) ?? {},
+      position: n.position,
+    })),
     edges: edges.map<FlowEdge>((e) => ({
       id: e.id,
       source: e.source,
       target: e.target,
       sourcePort: e.sourceHandle ?? undefined,
     })),
-  }), [nodes, edges, trigger]);
+  }), [nodes, edges]);
 
   // ── Save ────────────────────────────────────────────────────────────
   const [saving, setSaving] = React.useState(false);
@@ -449,8 +418,13 @@ function FlowEditorInner({
   // runningNodeId is declared near the top of this component so the
   // node-data sync effect can see it.
   const testRun = async () => {
-    if (nodes.filter((n) => n.id !== TRIGGER_ID).length === 0) {
-      toast.error("Add at least one action before running");
+    // Need at least one non-trigger node to have something to run.
+    const hasActions = nodes.some((n) => {
+      const t = ((n.data as Record<string, unknown>).type as string) ?? "";
+      return t && !isTriggerType(t);
+    });
+    if (!hasActions) {
+      toast.error("Add a trigger and at least one action before running");
       return;
     }
     setTesting(true);
@@ -643,44 +617,32 @@ function FlowEditorInner({
               </Button>
             </div>
             <TabsContent value="config" className="flex-1 overflow-y-auto m-0">
-              {selectedTrigger ? (
-                <div className="p-4 space-y-3">
-                  <Label>Trigger</Label>
-                  <Select value={trigger.type} onValueChange={(v) => onTriggerKindChange(v as TriggerSpec["type"])}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {TRIGGER_CATALOG.map((t) => (
-                        <SelectItem key={t.type} value={t.type}>{t.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <NodeConfig
-                    nodeId={TRIGGER_ID}
-                    nodeType={trigger.type}
-                    triggerKind={trigger.type}
-                    config={trigger.config as Record<string, unknown>}
-                    onChange={onConfigChange}
-                    connections={connections}
-                  />
-                  {mode === "edit" && trigger.type === "webhook" && (
-                    <WebhookUrlBlock flowId={flowId!} secret={meta.webhookSecret ?? ""} />
-                  )}
-                </div>
-              ) : selectedNode ? (
+              {selectedNode ? (
                 <NodeConfig
                   nodeId={selectedNode.id}
                   nodeType={(selectedNode.data as Record<string, unknown>).type as string}
+                  // Triggers and action nodes both use NodeConfig; `triggerKind`
+                  // when set tells the form to render the trigger config UI.
+                  triggerKind={
+                    selectedTrigger
+                      ? (((selectedNode.data as Record<string, unknown>).type as string) as never)
+                      : undefined
+                  }
                   config={((selectedNode.data as Record<string, unknown>).config as Record<string, unknown>) ?? {}}
                   onChange={onConfigChange}
                   onDelete={onDeleteSelected}
                   connections={connections}
                   availableRefs={availableRefs}
-                  onRunStep={runStep}
+                  onRunStep={selectedTrigger ? undefined : runStep}
                   runningStep={steppingId === selectedNode.id}
                   jsCodeContextDts={jsCodeContextDts}
+                  flowId={flowId}
                 />
               ) : (
-                <div className="p-4 text-sm text-muted-foreground">Click a node to configure it.</div>
+                <div className="p-4 text-sm text-muted-foreground">
+                  Drag a node from the palette to start. Begin with a trigger (Schedule, Manual,
+                  Webhook, S3) so the flow knows when to run.
+                </div>
               )}
             </TabsContent>
             <TabsContent value="output" className="m-0 p-4">
@@ -884,55 +846,25 @@ function SettingsForm({
   );
 }
 
-function WebhookUrlBlock({ flowId, secret }: { flowId: string; secret: string }) {
-  const [origin, setOrigin] = React.useState("");
-  React.useEffect(() => { setOrigin(window.location.origin); }, []);
-  const url = `${origin}/api/flows/webhook/${flowId}?secret=${secret}`;
-  return (
-    <div className="space-y-2 border-t pt-3">
-      <Label className="flex items-center gap-1"><Webhook className="h-3 w-3" /> Webhook URL</Label>
-      <div className="flex gap-1">
-        <Input value={url} readOnly className="font-mono text-xs" />
-        <Button
-          size="icon"
-          variant="outline"
-          onClick={() => { navigator.clipboard.writeText(url); toast.success("Copied"); }}
-        >
-          <Copy className="h-3.5 w-3.5" />
-        </Button>
-      </div>
-      <p className="text-[10px] text-muted-foreground">
-        POST any JSON to this URL to trigger the flow. The body is available as <code>{`{{ $trigger.body }}`}</code>.
-      </p>
-    </div>
-  );
-}
-
 // ─── Helpers ───────────────────────────────────────────────────────────
 
-function defaultNodes(def?: FlowDefinition, trigger?: TriggerSpec): Node[] {
-  const triggerKind = def?.trigger.type ?? trigger?.type ?? "schedule";
-  const triggerNode: Node = {
-    id: TRIGGER_ID,
-    type: "dbcNode",
-    position: { x: 40, y: 160 },
-    data: { label: findCatalog(triggerKind)?.label ?? triggerKind, type: triggerKind, isTrigger: true },
-    deletable: false,
-    draggable: false,
-  };
-  const others: Node[] = (def?.nodes ?? []).map((n) => ({
+function defaultNodes(def?: FlowDefinition): Node[] {
+  // v2: triggers live in `def.nodes` like any other node. The caller is
+  // responsible for normalizing v1 → v2 via `normalizeFlowDefinition` before
+  // passing the definition in.
+  if (!def?.nodes?.length) return [];
+  return def.nodes.map((n) => ({
     id: n.id,
     type: "dbcNode",
     position: n.position ?? { x: 280, y: 160 },
     data: {
       label: findCatalog(n.type)?.label ?? n.type,
       type: n.type,
-      isTrigger: false,
+      isTrigger: TRIGGER_NODE_TYPES.includes(n.type as never),
       config: n.config,
       summary: summarise(n.type, n.config),
     },
   }));
-  return [triggerNode, ...others];
 }
 
 /**

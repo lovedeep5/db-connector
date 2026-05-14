@@ -1,40 +1,83 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { db, schema } from "@/lib/db/client";
 import { runFlow, FlowConcurrencyError } from "@/server/services/flow-runner";
+import { parseAndNormalize, triggerNodesOfType } from "@/lib/flows/definition";
 
 export const runtime = "nodejs";
 
 /**
- * POST/GET /api/flows/webhook/:id
+ * Webhook entry point.
  *
- * Optional HMAC verification: send an `X-DBConnector-Signature` header with
- * `sha256=<hex>` where the hex is HMAC-SHA256(rawBody, flow.webhookSecret).
- * If the header is absent we still require the URL secret match — that is,
- * the path id is the public flow id but we expect the secret in a query
- * parameter `?secret=<webhookSecret>`. Easy first-class auth; for stronger
- * trust use the HMAC header.
+ *   POST/GET/PUT/PATCH/DELETE /api/flows/webhook/:id
+ *
+ * The legacy single-trigger route. Finds the (single) webhook trigger node
+ * in the flow's definition and fires it. For multi-trigger flows where the
+ * trigger node id is known (e.g. copied from the editor), the client should
+ * use the explicit path `/api/flows/webhook/:id/:triggerId` instead — handled
+ * by the sibling `[triggerId]/route.ts`.
+ *
+ * Auth: when the trigger's `secret` is configured, requests MUST send it
+ * in the `X-Webhook-Secret` header (timing-safe compared). With no secret,
+ * the endpoint is open — useful for quick demos, but anyone with the URL
+ * can fire the flow.
  */
-async function handle(req: NextRequest, id: string) {
-  const [row] = await db.select().from(schema.flows).where(eq(schema.flows.id, id));
-  if (!row || !row.isActive) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  if (!row.webhookSecret) return NextResponse.json({ error: "Webhook not enabled" }, { status: 400 });
+async function handle(
+  req: NextRequest,
+  flowId: string,
+  triggerNodeId?: string
+) {
+  const [row] = await db.select().from(schema.flows).where(eq(schema.flows.id, flowId));
+  if (!row || !row.isActive) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  const def = parseAndNormalize(row.definition);
+  const webhookTriggers = triggerNodesOfType(def, "webhook");
+  if (webhookTriggers.length === 0) {
+    return NextResponse.json({ error: "Webhook trigger not configured" }, { status: 400 });
+  }
+
+  // Pick the trigger: explicit id wins; otherwise fall back to the only one
+  // (or 400 if ambiguous and the URL didn't disambiguate).
+  let trigger;
+  if (triggerNodeId) {
+    trigger = webhookTriggers.find((t) => t.id === triggerNodeId);
+    if (!trigger) {
+      return NextResponse.json({ error: "Trigger node not found" }, { status: 404 });
+    }
+  } else if (webhookTriggers.length === 1) {
+    trigger = webhookTriggers[0];
+  } else {
+    return NextResponse.json({
+      error: "Flow has multiple webhook triggers. Use /api/flows/webhook/<flowId>/<triggerNodeId> to pick one.",
+    }, { status: 400 });
+  }
+
+  const cfg = trigger.config as { method?: string; secret?: string };
+
+  // Method gate. Default to POST when unspecified.
+  const allowedMethod = (cfg.method ?? "POST").toUpperCase();
+  if (req.method.toUpperCase() !== allowedMethod) {
+    return NextResponse.json({ error: `Use ${allowedMethod}` }, { status: 405 });
+  }
+
+  // Header auth when a secret is configured. No query-string fallback —
+  // query strings end up in server logs.
+  if (cfg.secret) {
+    const provided = req.headers.get("x-webhook-secret") ?? "";
+    if (!safeEq(provided, cfg.secret)) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+  }
 
   const url = req.nextUrl;
   const queryParams: Record<string, string> = {};
   url.searchParams.forEach((v, k) => (queryParams[k] = v));
-
   const headers: Record<string, string> = {};
   req.headers.forEach((v, k) => (headers[k] = v));
 
   const rawBody = await req.text();
-  const signature = req.headers.get("x-dbconnector-signature");
-  const querySecret = queryParams.secret;
-  if (!verifyAuth(row.webhookSecret, signature, querySecret, rawBody)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   let body: unknown = null;
   if (rawBody) {
     const ct = (headers["content-type"] ?? "").toLowerCase();
@@ -47,8 +90,9 @@ async function handle(req: NextRequest, id: string) {
 
   try {
     const run = await runFlow({
-      flowId: id,
+      flowId,
       trigger: { kind: "webhook", body, headers, query: queryParams },
+      entryTriggerId: trigger.id,
     });
     return NextResponse.json({ ok: true, runId: run.runId, status: run.status });
   } catch (e) {
@@ -59,20 +103,6 @@ async function handle(req: NextRequest, id: string) {
   }
 }
 
-function verifyAuth(
-  secret: string,
-  signatureHeader: string | null,
-  querySecret: string | undefined,
-  rawBody: string
-): boolean {
-  if (querySecret && safeEq(querySecret, secret)) return true;
-  if (signatureHeader && signatureHeader.startsWith("sha256=")) {
-    const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
-    return safeEq(signatureHeader.slice("sha256=".length), expected);
-  }
-  return false;
-}
-
 function safeEq(a: string, b: string): boolean {
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -80,12 +110,18 @@ function safeEq(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  return handle(req, id);
-}
+type Ctx = { params: Promise<{ id: string }> };
+const make = (h: (req: NextRequest, id: string) => Promise<Response>) =>
+  async function (req: NextRequest, ctx: Ctx) {
+    const { id } = await ctx.params;
+    return h(req, id);
+  };
 
-export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  return handle(req, id);
-}
+export const POST = make((req, id) => handle(req, id));
+export const GET = make((req, id) => handle(req, id));
+export const PUT = make((req, id) => handle(req, id));
+export const PATCH = make((req, id) => handle(req, id));
+export const DELETE = make((req, id) => handle(req, id));
+
+/** Re-export so the per-trigger handler at `[triggerId]/route.ts` can delegate. */
+export { handle };

@@ -1,13 +1,16 @@
 /**
- * Registers an active flow's `schedule` trigger with the existing node-cron
- * scheduler. The same cron infrastructure that runs scheduled reports also
- * runs scheduled flows; they just point at different runners.
+ * Registers every active flow's `schedule` trigger node(s) with the existing
+ * node-cron scheduler. A flow can have any number of schedule triggers
+ * (each its own cron); we keep one cron task per (flowId, triggerNodeId).
+ *
+ * Registry key is `${flowId}::${triggerNodeId}` so refreshes can replace
+ * individual entries without affecting siblings.
  */
 import cron, { type ScheduledTask } from "node-cron";
 import { eq } from "drizzle-orm";
 import { db, schema } from "@/lib/db/client";
 import { runFlow, FlowConcurrencyError } from "@/server/services/flow-runner";
-import type { FlowDefinition } from "./types";
+import { parseAndNormalize, triggerNodesOfType } from "./definition";
 
 type Entry = { task: ScheduledTask; cron: string };
 
@@ -17,23 +20,27 @@ const g = globalThis as unknown as {
 };
 const registry: Map<string, Entry> = (g.__dbcFlowSchedules ??= new Map());
 
+const keyOf = (flowId: string, triggerNodeId: string) => `${flowId}::${triggerNodeId}`;
+
 export async function ensureFlowSchedulesStarted(): Promise<void> {
   if (g.__dbcFlowSchedInit) return;
   g.__dbcFlowSchedInit = true;
   await refreshAllFlows();
   // eslint-disable-next-line no-console
-  console.log(`[flows] started with ${registry.size} active schedules`);
+  console.log(`[flows] started with ${registry.size} active schedule triggers`);
 }
 
 export async function refreshAllFlows(): Promise<void> {
   const flows = await db.select().from(schema.flows);
-  const seen = new Set<string>();
+  const seenKeys = new Set<string>();
   for (const f of flows) {
-    seen.add(f.id);
-    if (f.isActive) registerFlow(f.id, f.definition);
-    else unregisterFlow(f.id);
+    if (!f.isActive) {
+      unregisterFlow(f.id);
+      continue;
+    }
+    for (const key of registerScheduleTriggers(f.id, f.definition)) seenKeys.add(key);
   }
-  for (const id of [...registry.keys()]) if (!seen.has(id)) unregisterFlow(id);
+  for (const key of [...registry.keys()]) if (!seenKeys.has(key)) stopEntry(key);
 }
 
 export async function refreshOneFlow(flowId: string): Promise<void> {
@@ -42,42 +49,61 @@ export async function refreshOneFlow(flowId: string): Promise<void> {
     unregisterFlow(flowId);
     return;
   }
-  registerFlow(flowId, row.definition);
+  const seen = registerScheduleTriggers(flowId, row.definition);
+  // Stop any orphan entries that previously existed for this flow but were removed.
+  for (const key of [...registry.keys()]) {
+    if (key.startsWith(`${flowId}::`) && !seen.has(key)) stopEntry(key);
+  }
 }
 
+/** Stop every cron entry belonging to a flow. Called on delete / deactivate. */
 export function unregisterFlow(flowId: string): void {
-  const e = registry.get(flowId);
+  for (const key of [...registry.keys()]) {
+    if (key.startsWith(`${flowId}::`)) stopEntry(key);
+  }
+}
+
+function stopEntry(key: string) {
+  const e = registry.get(key);
   if (!e) return;
   e.task.stop();
-  registry.delete(flowId);
+  registry.delete(key);
 }
 
-function registerFlow(flowId: string, definitionRaw: string): void {
-  let def: FlowDefinition;
-  try { def = JSON.parse(definitionRaw) as FlowDefinition; } catch { return; }
-  if (def.trigger?.type !== "schedule") {
-    unregisterFlow(flowId);
-    return;
-  }
-  const cronExpr = def.trigger.config.cron;
-  if (!cron.validate(cronExpr)) return;
-
-  const existing = registry.get(flowId);
-  if (existing) {
-    if (existing.cron === cronExpr) return;
-    existing.task.stop();
-    registry.delete(flowId);
-  }
-
-  const task = cron.schedule(cronExpr, async () => {
-    try {
-      await runFlow({ flowId, trigger: { kind: "schedule", firedAt: new Date() } });
-    } catch (e) {
-      if (e instanceof FlowConcurrencyError) return; // expected, recorded as skipped
-      // eslint-disable-next-line no-console
-      console.error(`[flows] run failed ${flowId}:`, (e as Error).message);
+/**
+ * Walks every schedule-type trigger node in the flow and ensures a cron
+ * task is registered for it. Returns the set of registry keys it touched
+ * so the caller can prune orphans.
+ */
+function registerScheduleTriggers(flowId: string, definitionRaw: string): Set<string> {
+  const seen = new Set<string>();
+  let def;
+  try { def = parseAndNormalize(definitionRaw); } catch { return seen; }
+  for (const tn of triggerNodesOfType(def, "schedule")) {
+    const cronExpr = (tn.config as { cron?: unknown }).cron;
+    if (typeof cronExpr !== "string" || !cron.validate(cronExpr)) continue;
+    const key = keyOf(flowId, tn.id);
+    seen.add(key);
+    const existing = registry.get(key);
+    if (existing && existing.cron === cronExpr) continue;
+    if (existing) {
+      existing.task.stop();
+      registry.delete(key);
     }
-  }, { scheduled: true });
-
-  registry.set(flowId, { task, cron: cronExpr });
+    const task = cron.schedule(cronExpr, async () => {
+      try {
+        await runFlow({
+          flowId,
+          trigger: { kind: "schedule", firedAt: new Date() },
+          entryTriggerId: tn.id,
+        });
+      } catch (e) {
+        if (e instanceof FlowConcurrencyError) return;
+        // eslint-disable-next-line no-console
+        console.error(`[flows] run failed ${flowId} trigger=${tn.id}:`, (e as Error).message);
+      }
+    }, { scheduled: true });
+    registry.set(key, { task, cron: cronExpr });
+  }
+  return seen;
 }

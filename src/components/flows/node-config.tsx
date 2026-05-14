@@ -42,6 +42,12 @@ export type NodeConfigProps = {
    * surfaces real field names instead of generic identifiers.
    */
   jsCodeContextDts?: string;
+  /**
+   * Id of the flow being edited (when known). Currently consumed by the
+   * webhook trigger form so it can display the inbound URL and copy button
+   * — only meaningful in edit mode after a first save.
+   */
+  flowId?: string;
 };
 
 /**
@@ -76,7 +82,7 @@ function Body(props: NodeConfigProps) {
   const { triggerKind, nodeType } = props;
   if (triggerKind === "schedule") return <ScheduleTriggerForm {...props} />;
   if (triggerKind === "manual") return <ManualTriggerForm />;
-  if (triggerKind === "webhook") return <WebhookTriggerForm />;
+  if (triggerKind === "webhook") return <WebhookTriggerForm {...props} />;
   if (triggerKind === "s3.objectCreated") return <S3TriggerForm {...props} />;
   if (nodeType === "db.query") return <DbQueryForm {...props} />;
   if (nodeType === "http.request") return <HttpRequestForm {...props} />;
@@ -149,15 +155,92 @@ function ManualTriggerForm() {
   );
 }
 
-function WebhookTriggerForm() {
+function WebhookTriggerForm(props: NodeConfigProps) {
+  const method = (get(props, "method", "POST") as string) ?? "POST";
+  const secret = (get(props, "secret", "") as string) ?? "";
+  const hasSecret = secret.length > 0;
+  const url =
+    props.flowId
+      ? `${typeof window !== "undefined" ? window.location.origin : ""}/api/flows/webhook/${props.flowId}/${props.nodeId}`
+      : null;
+  const generate = () => {
+    // 32-byte random hex secret. Plenty of entropy, no need for a server roundtrip.
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    set(props, "secret", hex);
+  };
+  const toggleSecret = (enabled: boolean) => {
+    if (enabled && !secret) generate();
+    if (!enabled) set(props, "secret", "");
+  };
+  const copy = (text: string) => {
+    if (!text) return;
+    navigator.clipboard?.writeText(text);
+  };
   return (
-    <div className="space-y-2 text-sm">
-      <p className="text-muted-foreground">
-        After saving, an inbound URL is generated. Copy it from the flow detail page and POST to it with your data.
-      </p>
-      <Badge variant="outline" className="text-[10px]">
-        Authentication: per-flow secret in <code>?secret=</code> OR HMAC header <code>X-DBConnector-Signature</code>
-      </Badge>
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <Label className="text-xs">HTTP method</Label>
+        <Select value={method} onValueChange={(v) => set(props, "method", v)}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => (
+              <SelectItem key={m} value={m}>{m}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-[10px] text-muted-foreground">Only this method will fire the flow.</p>
+      </div>
+
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <Switch checked={hasSecret} onCheckedChange={toggleSecret} id="webhook-secret" />
+          <Label htmlFor="webhook-secret" className="text-xs">Require a secret</Label>
+        </div>
+        <p className="text-[10px] text-muted-foreground">
+          When on, callers must send the secret in the <code>X-Webhook-Secret</code> header.
+          Anyone without it gets a 401.
+        </p>
+        {hasSecret && (
+          <div className="flex items-center gap-1 mt-1">
+            <Input
+              value={secret}
+              readOnly
+              className="font-mono text-[11px] h-7"
+            />
+            <Button type="button" variant="outline" size="sm" className="h-7 px-2" onClick={() => copy(secret)} title="Copy secret">
+              Copy
+            </Button>
+            <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={generate} title="Regenerate secret">
+              Regenerate
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {url ? (
+        <div className="space-y-1">
+          <Label className="text-xs">Inbound URL</Label>
+          <div className="flex items-center gap-1">
+            <Input value={url} readOnly className="font-mono text-[11px] h-7" />
+            <Button type="button" variant="outline" size="sm" className="h-7 px-2" onClick={() => copy(url)} title="Copy URL">
+              Copy
+            </Button>
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            {hasSecret ? (
+              <>Send <code>X-Webhook-Secret: &lt;your secret&gt;</code> on every request.</>
+            ) : (
+              <>No auth configured — anyone with this URL can fire the flow.</>
+            )}
+          </p>
+        </div>
+      ) : (
+        <p className="text-[10px] text-muted-foreground">
+          Save the flow once to generate the inbound URL for this trigger node.
+        </p>
+      )}
     </div>
   );
 }
@@ -478,31 +561,152 @@ function JsCodeForm(props: NodeConfigProps) {
 
 // ─── Phase 2A: control flow & transforms ───────────────────────────────
 
+type ConditionRow = { left: unknown; operator: string; right?: unknown };
+
+const OPERATOR_OPTIONS: { value: string; label: string; unary?: boolean }[] = [
+  { value: "equals", label: "is equal to" },
+  { value: "notEquals", label: "is not equal to" },
+  { value: "contains", label: "contains" },
+  { value: "notContains", label: "does not contain" },
+  { value: "startsWith", label: "starts with" },
+  { value: "endsWith", label: "ends with" },
+  { value: "regex", label: "matches regex" },
+  { value: "greaterThan", label: "is greater than" },
+  { value: "lessThan", label: "is less than" },
+  { value: "greaterOrEqual", label: "is greater or equal" },
+  { value: "lessOrEqual", label: "is less or equal" },
+  { value: "isEmpty", label: "is empty", unary: true },
+  { value: "isNotEmpty", label: "is not empty", unary: true },
+  { value: "isTrue", label: "is true", unary: true },
+  { value: "isFalse", label: "is false", unary: true },
+];
+const UNARY_OPS = new Set(OPERATOR_OPTIONS.filter((o) => o.unary).map((o) => o.value));
+
+/**
+ * Shared list-of-conditions editor used by If/Else and Filter. Each row:
+ * left value (templated), operator dropdown, right value (templated, hidden
+ * for unary operators). Plus an AND/OR combinator picker and "+ Add" button.
+ */
+function ConditionsEditor({
+  props,
+  hideArrayPath,
+}: {
+  props: NodeConfigProps;
+  hideArrayPath?: boolean;
+}) {
+  const conditions = React.useMemo<ConditionRow[]>(() => {
+    const raw = props.config.conditions;
+    if (Array.isArray(raw) && raw.length > 0) return raw as ConditionRow[];
+    return [{ left: "", operator: "equals", right: "" }];
+  }, [props.config]);
+  const combinator = (get(props, "combinator", "and") as string) || "and";
+
+  const update = (next: ConditionRow[]) => {
+    props.onChange({ ...props.config, conditions: next });
+  };
+  const setOne = (i: number, patch: Partial<ConditionRow>) =>
+    update(conditions.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
+  const add = () => {
+    if (conditions.length >= 25) return;
+    update([...conditions, { left: "", operator: "equals", right: "" }]);
+  };
+  const remove = (i: number) => {
+    if (conditions.length <= 1) return;
+    update(conditions.filter((_, idx) => idx !== i));
+  };
+
+  return (
+    <div className="space-y-3">
+      {!hideArrayPath ? null : null}
+      {conditions.length > 1 && (
+        <div className="flex items-center gap-2">
+          <Label className="text-xs">Combine with</Label>
+          <Select value={combinator} onValueChange={(v) => set(props, "combinator", v)}>
+            <SelectTrigger className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="and">AND</SelectItem>
+              <SelectItem value="or">OR</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      {conditions.map((c, i) => {
+        const isUnary = UNARY_OPS.has(c.operator);
+        return (
+          <div key={i} className="rounded border p-2 space-y-2 bg-muted/30">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                Condition {i + 1}
+              </span>
+              {conditions.length > 1 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-0 text-destructive"
+                  onClick={() => remove(i)}
+                  aria-label={`Remove condition ${i + 1}`}
+                  title="Remove this condition"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            <TemplateField
+              label="Value 1"
+              value={typeof c.left === "string" ? c.left : JSON.stringify(c.left ?? "")}
+              onChange={(v) => setOne(i, { left: v })}
+              placeholder="{{ $node.query_1.rows[0].status }}"
+              refs={props.availableRefs}
+            />
+            <div className="space-y-1">
+              <Label className="text-xs">Operation</Label>
+              <Select value={c.operator} onValueChange={(v) => setOne(i, { operator: v })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {OPERATOR_OPTIONS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {!isUnary && (
+              <TemplateField
+                label="Value 2"
+                value={typeof c.right === "string" ? c.right : JSON.stringify(c.right ?? "")}
+                onChange={(v) => setOne(i, { right: v })}
+                placeholder='"open" or 100 or {{ $node.X.field }}'
+                refs={props.availableRefs}
+              />
+            )}
+          </div>
+        );
+      })}
+      <div className="flex items-center justify-between">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={add}
+          disabled={conditions.length >= 25}
+          className="h-7 text-xs gap-1"
+        >
+          <Plus className="h-3 w-3" /> Add condition
+        </Button>
+        <span className="text-[10px] text-muted-foreground">{conditions.length} / 25</span>
+      </div>
+    </div>
+  );
+}
+
 function IfElseForm(props: NodeConfigProps) {
   return (
     <div className="space-y-3">
-      <div className="space-y-1">
-        <Label className="text-xs">Condition (JS expression)</Label>
-        <div className="border rounded h-32 overflow-hidden">
-          <MonacoEditor
-            language="javascript"
-            value={get(props, "expression", "$input.rowCount > 0") as string}
-            onChange={(v) => set(props, "expression", v)}
-          />
-        </div>
-        <p className="text-[10px] text-muted-foreground">
-          Truthy → <code>true</code> port fires; falsy → <code>false</code> port fires.
-          Use <code>$input</code> or <code>$prev</code>. Connect the two output ports to different branches.
-        </p>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs">Timeout (ms)</Label>
-        <Input
-          type="number"
-          value={get(props, "timeoutMs", 5_000) as number}
-          onChange={(e) => set(props, "timeoutMs", Number(e.target.value))}
-        />
-      </div>
+      <ConditionsEditor props={props} />
+      <p className="text-[10px] text-muted-foreground">
+        Routes to the <strong className="text-emerald-500">true</strong> port when the conditions match,
+        otherwise the <strong className="text-rose-500">false</strong> port.
+      </p>
     </div>
   );
 }
@@ -511,26 +715,18 @@ function FilterForm(props: NodeConfigProps) {
   return (
     <div className="space-y-3">
       <TemplateField
-        label="Array path on input (optional)"
-        value={get(props, "arrayPath", "") as string}
-        onChange={(v) => set(props, "arrayPath", v)}
-        placeholder="e.g. rows  or  body.data"
-        helpText="Leave blank when the input is already an array or a { rows: [...] } object."
+        label="Array to filter"
+        value={get(props, "items", "") as string}
+        onChange={(v) => set(props, "items", v)}
+        placeholder="{{ $node.query_1.rows }}"
+        helpText="Pick the upstream array via Insert ref. The conditions below run against each item; matching items are kept unchanged."
         refs={props.availableRefs}
       />
-      <div className="space-y-1">
-        <Label className="text-xs">Predicate (JS, runs per item)</Label>
-        <div className="border rounded h-32 overflow-hidden">
-          <MonacoEditor
-            language="javascript"
-            value={get(props, "predicate", "$item.active === true") as string}
-            onChange={(v) => set(props, "predicate", v)}
-          />
-        </div>
-        <p className="text-[10px] text-muted-foreground">
-          Receives <code>$item</code>, <code>$index</code>, <code>$input</code> (whole array). Return truthy to keep.
-        </p>
-      </div>
+      <ConditionsEditor props={props} />
+      <p className="text-[10px] text-muted-foreground">
+        Matching items pass through unchanged. The output is the filtered subset.
+        Inside a condition, <code>{`{{ $item.<field> }}`}</code> refers to the current item.
+      </p>
     </div>
   );
 }
