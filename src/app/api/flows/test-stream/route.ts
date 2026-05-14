@@ -3,9 +3,9 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { testRunFlow, type TestRunEvent } from "@/server/services/flow-test-runner";
 import { pruneToAncestorsOf } from "@/lib/flows/subflow";
-import { normalizeFlowDefinition } from "@/lib/flows/definition";
+import { normalizeFlowDefinition, pickEntryTrigger } from "@/lib/flows/definition";
 import { probeS3OnceForTest } from "@/lib/flows/s3-poller";
-import { isTriggerType, type FlowDefinition, type TriggerPayload } from "@/lib/flows/types";
+import { isTriggerType, type FlowDefinition, type FlowNode, type TriggerPayload } from "@/lib/flows/types";
 
 export const runtime = "nodejs";
 
@@ -79,14 +79,23 @@ export async function POST(req: NextRequest) {
   if (parsed.targetNodeId && !fullDef.nodes.find((n) => n.id === parsed.targetNodeId)) {
     return NextResponse.json({ error: "Target node is not in this flow." }, { status: 400 });
   }
-  const entryTrigger = parsed.entryTriggerId
-    ? fullDef.nodes.find((n) => n.id === parsed.entryTriggerId)
-    : undefined;
-  if (parsed.entryTriggerId && !entryTrigger) {
-    return NextResponse.json({ error: "Trigger node not found." }, { status: 400 });
-  }
-  if (entryTrigger && !isTriggerType(entryTrigger.type)) {
-    return NextResponse.json({ error: "Selected node is not a trigger." }, { status: 400 });
+  // When the caller picks a trigger explicitly we honor it; otherwise auto-
+  // pick (prefer manual, else any trigger). This keeps the legacy main
+  // "Test run" button working AND records a faithful trigger payload no
+  // matter which entry point ended up firing.
+  let entryTrigger: FlowNode | undefined;
+  if (parsed.entryTriggerId) {
+    entryTrigger = fullDef.nodes.find((n) => n.id === parsed.entryTriggerId);
+    if (!entryTrigger) {
+      return NextResponse.json({ error: "Trigger node not found." }, { status: 400 });
+    }
+    if (!isTriggerType(entryTrigger.type)) {
+      return NextResponse.json({ error: "Selected node is not a trigger." }, { status: 400 });
+    }
+  } else if (!parsed.targetNodeId) {
+    // Step-runs prune to ancestors; for those we keep the legacy "no entry"
+    // behaviour (all roots reachable). For full test runs we pick one.
+    entryTrigger = pickEntryTrigger(fullDef);
   }
 
   const def = parsed.targetNodeId
@@ -119,7 +128,10 @@ export async function POST(req: NextRequest) {
           userId,
           defaultNodeTimeoutMs: parsed.defaultNodeTimeoutMs,
           trigger,
-          entryTriggerId: parsed.entryTriggerId,
+          // Pass the resolved trigger id (explicit or auto-picked) so the
+          // runner restricts execution to its downstream and records the
+          // matching payload on the trigger's node-run row.
+          entryTriggerId: entryTrigger?.id,
           onEvent: (event: TestRunEvent) => send(event),
         });
         send({ type: "done", result: finalResult });

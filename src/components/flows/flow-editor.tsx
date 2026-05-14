@@ -670,14 +670,14 @@ function FlowEditorInner({
                 </div>
               )}
             </TabsContent>
-            <TabsContent value="output" className="m-0 p-4">
+            <TabsContent value="output" className="m-0 p-4 flex-1 overflow-y-auto">
               <OutputPanel
                 selectedNodeId={selectedNode?.id ?? null}
                 result={lastTestRun}
                 onSelectNode={setSelectedId}
               />
             </TabsContent>
-            <TabsContent value="settings" className="m-0 p-4">
+            <TabsContent value="settings" className="m-0 p-4 flex-1 overflow-y-auto">
               <SettingsForm meta={meta} setMeta={setMeta} myTeams={myTeams} />
             </TabsContent>
           </Tabs>
@@ -782,24 +782,24 @@ function NodeRunDetail({ r }: { r: TestNodeResult }) {
         <span className="text-muted-foreground ml-auto">{r.durationMs}ms</span>
       </div>
       {r.errorMessage && (
-        <pre className="bg-destructive/10 text-destructive p-2 rounded whitespace-pre-wrap">{r.errorMessage}</pre>
+        <pre className="bg-destructive/10 text-destructive p-2 rounded whitespace-pre-wrap max-h-48 overflow-auto">{r.errorMessage}</pre>
       )}
       {r.logs && r.logs.length > 0 && (
         <details open>
           <summary className="cursor-pointer text-muted-foreground">logs ({r.logs.length})</summary>
-          <pre className="mt-1 p-2 bg-muted rounded overflow-x-auto whitespace-pre-wrap">{r.logs.join("\n")}</pre>
+          <pre className="mt-1 p-2 bg-muted rounded overflow-auto whitespace-pre-wrap max-h-64">{r.logs.join("\n")}</pre>
         </details>
       )}
       {r.input !== undefined && (
         <details>
           <summary className="cursor-pointer text-muted-foreground">input</summary>
-          <pre className="mt-1 p-2 bg-muted rounded overflow-x-auto whitespace-pre">{JSON.stringify(r.input, null, 2)}</pre>
+          <pre className="mt-1 p-2 bg-muted rounded overflow-auto whitespace-pre max-h-80">{JSON.stringify(r.input, null, 2)}</pre>
         </details>
       )}
       {r.output !== undefined && (
         <details open>
           <summary className="cursor-pointer text-muted-foreground">output</summary>
-          <pre className="mt-1 p-2 bg-muted rounded overflow-x-auto whitespace-pre">{JSON.stringify(r.output, null, 2)}</pre>
+          <pre className="mt-1 p-2 bg-muted rounded overflow-auto whitespace-pre max-h-96">{JSON.stringify(r.output, null, 2)}</pre>
         </details>
       )}
     </div>
