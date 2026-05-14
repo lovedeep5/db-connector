@@ -121,10 +121,30 @@ export async function testRunFlow(opts: TestRunOpts): Promise<TestRunResult> {
 
   for (const node of order) {
     if (consumedByLoop.has(node.id)) continue;
-    // Triggers don't execute — propagate downstream if this trigger fired.
+    // Triggers don't have an execute(), but we still record a result for
+    // them so the Output panel can show the payload they delivered (the S3
+    // poll's bucket/key/presignedUrl, the webhook body, the schedule
+    // firedAt, etc.). Non-firing triggers in the same flow are recorded
+    // as skipped so the user can see why their subgraph stayed dark.
     if (triggerNodeIds.has(node.id)) {
-      if (reachable.has(node.id)) {
+      const fired = reachable.has(node.id);
+      if (fired) {
         propagateReachable(node.id, undefined, def.edges, reachable);
+        startNode(node.id, node.type);
+        record({
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "success",
+          durationMs: 0,
+          output: safeSerialise(prevOutputs.get(node.id)),
+        });
+      } else {
+        record({
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "skipped",
+          durationMs: 0,
+        });
       }
       continue;
     }

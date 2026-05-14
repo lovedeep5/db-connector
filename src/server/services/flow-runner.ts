@@ -161,12 +161,33 @@ async function executeNodes(
 
   for (const node of order) {
     if (consumedByLoop.has(node.id)) continue;
-    // Triggers themselves don't execute — they're entry points. If the
-    // trigger is the one that fired this run, propagate its downstream
-    // edges into `reachable`; otherwise leave its branch dormant.
+    // Triggers don't have an execute(), but we still write a flow_node_runs
+    // row so the run history shows WHAT fired this run (S3 key, webhook body,
+    // schedule firedAt, etc.). Non-firing triggers in the same flow are
+    // logged as skipped so the user can see at a glance which entry point
+    // actually triggered.
     if (triggerNodeIds.has(node.id)) {
-      if (reachable.has(node.id)) {
+      const fired = reachable.has(node.id);
+      if (fired) {
         propagateReachable(node.id, undefined, def.edges, reachable);
+        await db.insert(schema.flowNodeRuns).values({
+          flowRunId: runId,
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "success",
+          output: JSON.stringify(safeSerialise(prevOutputs.get(node.id))),
+          durationMs: 0,
+          startedAt: new Date(),
+        });
+      } else {
+        await db.insert(schema.flowNodeRuns).values({
+          flowRunId: runId,
+          nodeId: node.id,
+          nodeType: node.type,
+          status: "skipped",
+          durationMs: 0,
+          startedAt: new Date(),
+        });
       }
       continue;
     }
