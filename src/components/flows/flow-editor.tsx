@@ -23,7 +23,7 @@ import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
-  Loader2, Save, ArrowLeft, Play, AlertCircle, CheckCircle2,
+  Loader2, Save, ArrowLeft, Play, Pause, AlertCircle, CheckCircle2,
   PanelLeftClose, PanelLeftOpen,
   Wand2, Maximize2, Settings as SettingsIcon,
 } from "lucide-react";
@@ -41,12 +41,12 @@ import { NodePalette, NODE_DRAG_TYPE } from "./node-palette";
 import { NodeConfig } from "./node-config";
 import { findCatalog } from "./node-catalog";
 import { applyDagreLayout } from "./auto-layout";
-import { createFlow, updateFlow } from "@/server/actions/flows";
+import { createFlow, setFlowActive, updateFlow } from "@/server/actions/flows";
 import { testRunFlowAction, testRunUpToNodeAction } from "@/server/actions/flow-test";
 import type { TestRunResult } from "@/server/services/flow-test-runner";
 import type { FlowDefinition, FlowNode as DefNode, FlowEdge } from "@/lib/flows/types";
 import { isTriggerType, TRIGGER_NODE_TYPES } from "@/lib/flows/types";
-import { normalizeFlowDefinition } from "@/lib/flows/definition";
+import { normalizeFlowDefinition, triggerDefaults } from "@/lib/flows/definition";
 import { buildAvailableRefs } from "./refs-builder";
 import { buildJsCodeContextDts } from "./js-code-context";
 import { NodeModal } from "./node-modal";
@@ -420,6 +420,30 @@ function FlowEditorInner({
     }
   };
 
+  // ── Pause / Resume ──────────────────────────────────────────────────
+  // The Settings dialog's Active switch only flips local state; users
+  // expected "off" to stop the cron/S3 timers immediately. This dedicated
+  // topbar button calls setFlowActive() which writes the DB *and*
+  // unregisters the per-flow scheduler entries in one shot. Only meaningful
+  // in edit mode — in create mode there's no flowId yet, so the SettingsForm
+  // switch (which just stages meta.isActive for the upcoming createFlow) is
+  // still the right control.
+  const [togglingActive, setTogglingActive] = React.useState(false);
+  const toggleActive = async () => {
+    if (!flowId) return;
+    const next = !meta.isActive;
+    setTogglingActive(true);
+    try {
+      await setFlowActive(flowId, next);
+      setMeta({ ...meta, isActive: next });
+      toast.success(next ? "Flow resumed" : "Flow paused");
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setTogglingActive(false);
+    }
+  };
+
   // ── Test run (no persistence) ───────────────────────────────────────
   const [testing, setTesting] = React.useState(false);
   // runningNodeId is declared near the top of this component so the
@@ -549,6 +573,8 @@ function FlowEditorInner({
         testing={testing}
         lastTestRun={lastTestRun}
         onOpenSettings={() => setSettingsOpen(true)}
+        onToggleActive={flowId ? toggleActive : undefined}
+        togglingActive={togglingActive}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -660,6 +686,7 @@ function FlowEditorInner({
         meta={meta}
         setMeta={setMeta}
         myTeams={myTeams}
+        showActiveSwitch={mode === "create"}
       />
     </div>
   );
@@ -671,12 +698,14 @@ function FlowSettingsDialog({
   meta,
   setMeta,
   myTeams,
+  showActiveSwitch,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   meta: FlowMeta;
   setMeta: (m: FlowMeta) => void;
   myTeams: Team[];
+  showActiveSwitch: boolean;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -687,7 +716,7 @@ function FlowSettingsDialog({
             How this flow runs and who can see it. Changes are saved with the flow.
           </DialogDescription>
         </DialogHeader>
-        <SettingsForm meta={meta} setMeta={setMeta} myTeams={myTeams} />
+        <SettingsForm meta={meta} setMeta={setMeta} myTeams={myTeams} showActiveSwitch={showActiveSwitch} />
       </DialogContent>
     </Dialog>
   );
@@ -695,6 +724,7 @@ function FlowSettingsDialog({
 
 function Header({
   meta, setMeta, onBack, onSave, saving, onTestRun, testing, lastTestRun, onOpenSettings,
+  onToggleActive, togglingActive,
 }: {
   meta: FlowMeta;
   setMeta: (m: FlowMeta) => void;
@@ -705,6 +735,9 @@ function Header({
   testing: boolean;
   lastTestRun: TestRunResult | null;
   onOpenSettings: () => void;
+  /** Only set in edit mode — clicking flips DB state and registers/unregisters timers immediately. */
+  onToggleActive?: () => void;
+  togglingActive: boolean;
 }) {
   return (
     <div className="border-b p-3 flex items-center gap-3 bg-card/40">
@@ -725,6 +758,21 @@ function Header({
         </Badge>
       )}
       <div className="flex-1" />
+      {onToggleActive && (
+        <Button
+          variant="outline"
+          onClick={onToggleActive}
+          disabled={togglingActive}
+          title={meta.isActive ? "Stop the schedule/S3 timers for this flow right now" : "Re-register the schedule/S3 timers"}
+        >
+          {togglingActive
+            ? <Loader2 className="h-4 w-4 animate-spin" />
+            : meta.isActive
+              ? <Pause className="h-4 w-4" />
+              : <Play className="h-4 w-4" />}
+          {meta.isActive ? "Pause" : "Resume"}
+        </Button>
+      )}
       <Button variant="ghost" size="icon" onClick={onOpenSettings} title="Flow settings">
         <SettingsIcon className="h-4 w-4" />
       </Button>
@@ -739,11 +787,13 @@ function Header({
 }
 
 function SettingsForm({
-  meta, setMeta, myTeams,
+  meta, setMeta, myTeams, showActiveSwitch,
 }: {
   meta: FlowMeta;
   setMeta: (m: FlowMeta) => void;
   myTeams: Team[];
+  /** Create mode only: in edit mode the canonical control is the topbar Pause/Resume button. */
+  showActiveSwitch: boolean;
 }) {
   return (
     <div className="space-y-4">
@@ -751,10 +801,12 @@ function SettingsForm({
         <Label>Description</Label>
         <Textarea rows={2} value={meta.description ?? ""} onChange={(e) => setMeta({ ...meta, description: e.target.value })} />
       </div>
-      <div className="flex items-center gap-2">
-        <Switch checked={meta.isActive} onCheckedChange={(v) => setMeta({ ...meta, isActive: v })} />
-        <Label>Active</Label>
-      </div>
+      {showActiveSwitch && (
+        <div className="flex items-center gap-2">
+          <Switch checked={meta.isActive} onCheckedChange={(v) => setMeta({ ...meta, isActive: v })} />
+          <Label>Active on save</Label>
+        </div>
+      )}
 
       <div className="space-y-1">
         <Label>Execution mode</Label>
@@ -896,10 +948,16 @@ async function runTestStream(
 }
 
 function defaultConfigFor(type: string): Record<string, unknown> {
+  // Triggers come from the shared `triggerDefaults` so the editor's
+  // drop-node path and `normalizeFlowDefinition`'s backfill path agree
+  // byte-for-byte. Returning {} here for an unknown trigger would silently
+  // skip the backfill, so always defer.
+  const triggerFill = triggerDefaults(type);
+  if (Object.keys(triggerFill).length > 0 || type === "manual") return triggerFill;
   switch (type) {
     case "db.query": return { connectionId: "", statement: "select 1;" };
     case "http.request": return { method: "GET", url: "https://api.example.com/", parseJson: true };
-    case "email.send": return { to: "", subject: "Report", html: "<p>Hi,</p>" };
+    case "email.send": return { to: "", subject: "Report", format: "text", body: "Hi,\n\nSee attached." };
     case "transform.toFile": return { filename: "report", format: "csv" };
     case "code.js": return { code: "return $input;", timeoutMs: 30_000 };
     case "control.ifElse": return { expression: "$input.rowCount > 0", timeoutMs: 5_000 };

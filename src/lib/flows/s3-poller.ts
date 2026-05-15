@@ -155,6 +155,11 @@ function clampInterval(n: unknown): number {
 
 async function pollOnce(flowId: string, triggerNode: FlowNode): Promise<void> {
   const cfg = triggerNode.config as S3TriggerConfig;
+  // Older trigger nodes were saved before `mode` was a required field — at
+  // poll time `cfg.mode` is then undefined. Treat anything other than the
+  // explicit "processAll" opt-in as "skipExisting" so we never fall through
+  // to firing the flow for every existing object.
+  const mode: "skipExisting" | "processAll" = cfg.mode === "processAll" ? "processAll" : "skipExisting";
   const [conn] = await db
     .select()
     .from(schema.connections)
@@ -168,7 +173,7 @@ async function pollOnce(flowId: string, triggerNode: FlowNode): Promise<void> {
   const state: TriggerState = allState[triggerNode.id] ?? {};
 
   const client = makeClient(creds);
-  if (!state.lastModifiedISO && cfg.mode === "skipExisting") {
+  if (!state.lastModifiedISO && mode === "skipExisting") {
     await saveState(flowId, allState, triggerNode.id, {
       lastModifiedISO: new Date().toISOString(),
       recentKeys: [],
@@ -188,6 +193,24 @@ async function pollOnce(flowId: string, triggerNode: FlowNode): Promise<void> {
   for (const obj of batch) {
     if (!obj.Key || !obj.LastModified) continue;
     if (recent.has(obj.Key)) continue;
+    // Re-read isActive before each fire. Without this, hitting Pause mid-batch
+    // (50 objects, each awaiting a full runFlow incl. email send) still
+    // hammers the recipient for the rest of the batch because the only
+    // isActive check is at the top of pollOnce. Persist whatever progress we
+    // made so the next poll resumes from the right watermark.
+    const [live] = await db
+      .select({ isActive: schema.flows.isActive })
+      .from(schema.flows)
+      .where(eq(schema.flows.id, flowId));
+    if (!live?.isActive) {
+      const merged = [...(state.recentKeys ?? []), ...seen];
+      const trimmed = merged.length > RECENT_KEYS_MAX ? merged.slice(-RECENT_KEYS_MAX) : merged;
+      await saveState(flowId, allState, triggerNode.id, {
+        lastModifiedISO: newWatermark?.toISOString() ?? state.lastModifiedISO,
+        recentKeys: trimmed,
+      });
+      return;
+    }
     seen.push(obj.Key);
     try {
       const presignedUrl = await getSignedUrl(
